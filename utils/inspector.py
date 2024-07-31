@@ -34,7 +34,7 @@ class ModelInspector():
         return tar
     
     def get_para(self, layer:Union[str, nn.Module], type_:str='list', verbose=True) -> Union[list, Generator]:
-        """Get target layer's parameters.
+        """Get target layer's parameters, be careful that this method would not return a dict.
 
         Args:
             layer (Union[str, nn.Module]): Layer name or layer module.
@@ -56,6 +56,30 @@ class ModelInspector():
         else:
             raise ValueError(f"Make sure that type_ is in 'list' or 'generator'.")
     
+    def get_grad(self, layer:Union[str, nn.Module], verbose=True) -> list:
+        """Get target layer's gradients.
+
+        Args:
+            layer (Union[str, nn.Module]): _description_
+            verbose (bool, optional): _description_. Defaults to True.
+
+        Returns:
+            list: _description_
+        """
+        gradients = {}
+        if isinstance(layer, str):
+            layer = self.get_layer(layer, verbose=False)
+        for name, para in layer.named_parameters():
+            if para.grad:
+                gradients[name] = para.grad
+                if verbose:
+                    print(f"Name {name}: shape {list(para.shape)}, min value {torch.min(p).item()}, max value {torch.max(p).item()}.")
+            else:
+                if verbose:
+                    print(f"Name {name}: no gradients.")
+        return gradients
+
+    
 
 
 if __name__ == "__main__":
@@ -66,4 +90,5 @@ if __name__ == "__main__":
     mp = ModelInspector(resnet50)
     # mp.show()
     layer = mp.get_layer('layer1.0')
-    mp.get_para(layer)
+    mp.get_para('layer1.0')
+    # mp.get_grad('layer1.0')

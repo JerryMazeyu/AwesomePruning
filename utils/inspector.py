@@ -20,35 +20,38 @@ class ModelInspector():
         """
         summary(self.model, mock_inp, device=next(self.model.parameters()).device.type)
     
-    def get_layer(self, name: str, verbose=True) -> nn.Module:
+    def get_layer(self, name:str, verbose=True) -> nn.Module:
         """Get a specific layer of model.
 
         Args:
-            name (str): Layer name, split by dot(.)
+            name (str): Layer name, split by dot(.), especially, can be 'all'
 
         Returns:
             nn.Module: Target layer
         """
-        name_list = name.split('.')
-        tar = self.model
-        for i in name_list:
-            try:
-                i = eval(i)
-            except:
-                pass
-            if isinstance(i, str):
-                tar = getattr(tar, i)
-            elif isinstance(i, int):
-                tar = tar[i]
-        if verbose:
-            print(f"Target layer: \n {tar}")
-        return tar
+        if name == 'all':
+            return self.model
+        else:
+            name_list = name.split('.')
+            tar = self.model
+            for i in name_list:
+                try:
+                    i = eval(i)
+                except:
+                    pass
+                if isinstance(i, str):
+                    tar = getattr(tar, i)
+                elif isinstance(i, int):
+                    tar = tar[i]
+            if verbose:
+                print(f"Target layer: \n {tar}")
+            return tar
     
-    def get_para(self, layer:Union[str, nn.Module], type_:str='list', verbose=True) -> Union[list, Generator]:
+    def get_para(self, layer:Union[str, nn.Module]='all', type_:str='list', verbose=True) -> Union[list, Generator]:
         """Get target layer's parameters, be careful that this method would not return a dict.
 
         Args:
-            layer (Union[str, nn.Module]): Layer name or layer module.
+            layer (Union[str, nn.Module]): Layer name or layer module, name splited by '.', for example, 'layer1.0.conv1'.
             type_ (str, optional): Type of parameters, list or generator. Defaults to 'list'.
 
         Returns:

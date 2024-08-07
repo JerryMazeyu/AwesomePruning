@@ -71,15 +71,15 @@ class ModelInspector():
         else:
             raise ValueError(f"Make sure that type_ is in 'list' or 'generator'.")
     
-    def get_grad(self, layer:Union[str, nn.Module], verbose=True) -> list:
+    def get_grad(self, layer:Union[str, nn.Module], type_:str='dict', verbose=True) -> Union[list, dict]:
         """Get target layer's gradients.
 
         Args:
-            layer (Union[str, nn.Module]): _description_
-            verbose (bool, optional): _description_. Defaults to True.
+            layer (Union[str, nn.Module]): Layer name split by dot.
+            verbose (bool, optional): If show verbose infomation. Defaults to True.
 
         Returns:
-            list: _description_
+            Union[list, dict: Gradient list / dict.
         """
         gradients = {}
         if isinstance(layer, str):
@@ -92,7 +92,10 @@ class ModelInspector():
             else:
                 if verbose:
                     print(f"Name {name}: no gradients.")
-        return gradients
+        if type_ == 'dict':
+            return gradients
+        else:
+            return [x[1] for x in gradients.item()]
     
     def plot_histogram(self, tensors:list[torch.Tensor], bin:int=30, save_path='./tensor_hist.png'):
         """

@@ -1,6 +1,9 @@
 import os
+import sys
 import random
 import datetime
+import functools
+import contextlib
 
 def generate_name() -> str:
     """Random generate a name.
@@ -339,3 +342,37 @@ def log(msg:str, level:str="INFO") -> None:
     """
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{current_time}] [{level}]\t{msg}")
+
+class LogRedirectMixin:
+    def __init__(self, log_path: str=None):
+        if not log_path:
+            log_path = generate_name()
+        flag = soft_mkdir(log_path)
+        if not flag:
+            raise Warning("Log path already exists.")
+        self.log_file_path = os.path.join(log_path, 'log.txt')
+        print(f"[INFO] Log saved in {log_path}")
+        self._wrap_methods()
+    
+    def log_decorator(self, func):
+        """Decorator to redirect stdout to the log file during function execution"""
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            original_stdout = sys.stdout
+            with open(self.log_file_path, 'a') as f:
+                with contextlib.redirect_stdout(f):
+                    result = func(*args, **kwargs)
+                sys.stdout = original_stdout
+                result = func(*args, **kwargs)
+            return result
+        return wrapper
+
+    def _wrap_methods(self):
+        """Wrap all user-defined methods with the log decorator"""
+        for attribute_name in dir(self):
+            if attribute_name.startswith("__") and attribute_name.endswith("__"):
+                continue  # Skip special methods
+            attribute = getattr(self, attribute_name)
+            if callable(attribute):
+                # Wrap the method with the log decorator
+                setattr(self, attribute_name, self.log_decorator(attribute))

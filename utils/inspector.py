@@ -1,3 +1,4 @@
+import os
 import torch
 from torch import nn
 from typing import Union, Generator
@@ -5,12 +6,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from math import ceil, sqrt
 from torchsummary import summary
-import torchviz
+from utils.io import LogRedirectMixin, log, generate_name
 
-
-class ModelInspector():
-    def __init__(self, model: nn.Module) -> None:
+class ModelInspector(LogRedirectMixin):
+    def __init__(self, model: nn.Module, log_path=None) -> None:
+        if not log_path:
+            log_path = generate_name()
+        super().__init__(log_path)
         self.model = model
+        self.log_path = log_path
     
     def summary(self, mock_inp:tuple=(3,224,224)):
         """Show model summary.
@@ -24,7 +28,7 @@ class ModelInspector():
         """Get a specific layer of model.
 
         Args:
-            name (str): Layer name, split by dot(.), especially, can be 'all'
+            name (str): Layer name, split by dot(.), especially, can be 'all'.
 
         Returns:
             nn.Module: Target layer
@@ -44,7 +48,7 @@ class ModelInspector():
                 elif isinstance(i, int):
                     tar = tar[i]
             if verbose:
-                print(f"Target layer: \n {tar}")
+                log(f"Target layer: \n {tar}")
             return tar
     
     def get_para(self, layer:Union[str, nn.Module]='all', type_:str='list', verbose=True) -> Union[list, Generator]:
@@ -63,7 +67,7 @@ class ModelInspector():
         list_para = list(para)
         if verbose:
             for ind, p in enumerate(list_para):
-                print(f"Index {ind}: shape {list(p.shape)}, min value {torch.min(p).item()}, max value {torch.max(p).item()}.")
+                log(f"Index {ind}: shape {list(p.shape)}, min value {torch.min(p).item()}, max value {torch.max(p).item()}.")
         if type_ == 'list':
             return list_para
         elif type_ == 'generator':
@@ -88,16 +92,16 @@ class ModelInspector():
             if para.grad:
                 gradients[name] = para.grad
                 if verbose:
-                    print(f"Name {name}: shape {list(para.shape)}, min value {torch.min(p).item()}, max value {torch.max(p).item()}.")
+                    log(f"Name {name}: shape {list(para.shape)}, min value {torch.min(p).item()}, max value {torch.max(p).item()}.")
             else:
                 if verbose:
-                    print(f"Name {name}: no gradients.")
+                    log(f"Name {name}: no gradients.")
         if type_ == 'dict':
             return gradients
         else:
             return [x[1] for x in gradients.item()]
     
-    def plot_histogram(self, tensors:list[torch.Tensor], bin:int=30, save_path='./tensor_hist.png'):
+    def plot_histogram(self, tensors:list[torch.Tensor], bin:int=30, save_path='tensor_hist.png'):
         """
         Plot a histogram of the values of a flattened tensor.
         
@@ -125,9 +129,8 @@ class ModelInspector():
             fig.delaxes(axes[j])
         
         plt.tight_layout()
-        plt.savefig(save_path)
+        plt.savefig(os.path.join(self.log_path, save_path))
 
-    
 
 
 if __name__ == "__main__":
@@ -139,5 +142,5 @@ if __name__ == "__main__":
     mp.summary()
     layer = mp.get_layer('layer1.0')
     tl = mp.get_para('layer1.0')
-    # mp.plot_histogram(tl)
-    # mp.get_grad('layer1.0')
+    mp.plot_histogram(tl)
+    mp.get_grad('layer1.0')

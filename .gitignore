@@ -4,3 +4,5 @@ __pycache__/
 .vscode
 raw_data/
 *.png
+debug.py
+experiments/

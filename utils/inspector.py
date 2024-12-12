@@ -1,7 +1,7 @@
 import os
 import torch
 from torch import nn
-from typing import Union, Generator
+from typing import Union, Generator, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from math import ceil, sqrt
@@ -9,9 +9,7 @@ from torchsummary import summary
 from utils.io import LogRedirectMixin, log, generate_name
 
 class ModelInspector(LogRedirectMixin):
-    def __init__(self, model: nn.Module, log_path=None) -> None:
-        if not log_path:
-            log_path = generate_name()
+    def __init__(self, model:nn.Module, log_path:Optional[str]=None) -> None:
         super().__init__(log_path)
         self.model = model
         self.log_path = log_path

@@ -5,6 +5,12 @@ import datetime
 import functools
 import contextlib
 
+def root():
+    for p in sys.path:
+        if p.endswith('AwesomePruning'):
+            return p
+    else:
+        raise ValueError('Cannot find root path of the project')
 def generate_name() -> str:
     """Random generate a name.
 
@@ -344,9 +350,14 @@ def log(msg:str, level:str="INFO") -> None:
     print(f"[{current_time}] [{level}]\t{msg}")
 
 class LogRedirectMixin:
+    """Log Redirect Mixin, Redirect stdout to a log file, and save the log file in the given path.
+       Usage:
+        1. Initialize the class with the parameter "log_path".
+        2. Call the log_decorator decorator to wrap the desired method.
+    """
     def __init__(self, log_path: str=None):
         if not log_path:
-            log_path = generate_name()
+            log_path = os.path.join(root(), 'experiments', generate_name())
         flag = soft_mkdir(log_path)
         if not flag:
             raise Warning("Log path already exists.")

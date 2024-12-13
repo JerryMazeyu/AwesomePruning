@@ -328,6 +328,19 @@ class Graphicalor(LogRedirectMixin):
         return data
 
     def graphb(self, verbose:bool=True):
+        """
+        Generate neuron-level graphs (graph_B) for all Conv2d and Linear layers in the model.
+
+        This method iterates over `self.graphb_nodes`, which contains the nodes of the computational graph.
+        For each node, if it is an instance of `nn.Conv2d` or `nn.Linear`, it generates a subgraph
+        representing the layer at the neuron level and appends it to `self.graph_B`.
+
+        Args:
+            verbose (bool, optional): If True, logs additional information during processing. Defaults to True.
+
+        Returns:
+            list: A list of subgraphs, where each subgraph represents a Conv2d or Linear layer at the neuron level.
+        """
         for node in self.graphb_nodes:
             if isinstance(node, nn.Conv2d):
                 self.graph_B.append(self.conv_to_graph(node))

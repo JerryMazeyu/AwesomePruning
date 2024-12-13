@@ -23,7 +23,7 @@ class Graphicalor(LogRedirectMixin):
         self.traced = symbolic_trace(self.network)
         self.extract_nodes_and_edges()
     
-    def get_layer(self, name:str, verbose=True) -> nn.Module:
+    def _get_layer(self, name:str, verbose=True) -> nn.Module:
         """Get a specific layer of model.
 
         Args:
@@ -84,6 +84,7 @@ class Graphicalor(LogRedirectMixin):
         mapping = {
             'conv': 'Convolution module',
             'linear': 'Linear module',
+            'fc': 'Linear module',
             'batch_norm': 'BatchNorm activation',
             'relu': 'ReLU activation',
             'max_pool': 'MaxPool function',
@@ -122,7 +123,6 @@ class Graphicalor(LogRedirectMixin):
         embbeding = torch.tensor(self.embedding_model.encode(description))
         return embbeding
     
-    def embedding_node_simple(self, node:dict, verbose:bool=True):
         pass
     
     def extract_parameter_features(self, parameters):
@@ -166,9 +166,13 @@ class Graphicalor(LogRedirectMixin):
         for ind, node in enumerate(self.traced.graph.nodes):
             setattr(node, 'name', node.name.replace('_', '.'))
             if node.op == "call_module":
-                tar_node = self.get_layer(node.name)
+                if 'fc' in node.name:
+                    pass
+                tar_node = self._get_layer(node.name)
+                setattr(tar_node, 'name', node.name)
+                setattr(tar_node, 'index', ind)
                 try:
-                    raw_params = torch.cat(list(tar_node.parameters()))
+                    raw_params = torch.cat([param.view(-1) for param in tar_node.parameters()], dim=0)
                 except:
                     raw_params = None
                 paras = self.extract_parameter_features(raw_params)
@@ -229,8 +233,108 @@ class Graphicalor(LogRedirectMixin):
             edge_index = nodes_and_edges['edge_index']
         )
         return self.graph_A
+    
+    def mlp_to_graph(self, layer:torch.nn.Module) -> Data:
+        
+        """
+        Convert an MLP layer into a graph representation.
 
-            
+        Args:
+            layer(torch.nn.Module.Linear): Layer.
+
+        Returns:
+            Data: A torch_geometric.data.Data object representing the MLP layer.
+        """
+        assert isinstance(layer, nn.Linear), "Make sure layer is nn.Linear."
+        weight = layer.weight
+        bias = layer.bias
+        in_features = weight.size(1)
+        out_features = weight.size(0)
+
+        # Nodes: input and output neurons
+        num_nodes = in_features + out_features
+        x = torch.zeros(num_nodes, 1)  # Nodes have no meaningful features, use zeros
+
+        # Edges: connections between input and output neurons
+        edge_index = []
+        edge_attr = []
+
+        for out_idx in range(out_features):
+            for in_idx in range(in_features):
+                edge_index.append([in_idx, in_features + out_idx])  # Edge: input -> output
+                edge_attr.append([weight[out_idx, in_idx].item(), bias[out_idx].item()])  # Weight + bias
+
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t()  # Shape [2, num_edges]
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float32)  # Shape [num_edges, 2]
+
+        # Create the Data object
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        try:
+            data.layer_name = layer.name
+            data.layer_index = layer.index
+        except:
+            pass
+        return data
+
+    def conv_to_graph(self, layer:torch.nn.Module) -> Data:
+        """
+        Convert an nn.Conv2d layer into a graph representation.
+
+        Args:
+            layer (torch.nn.Conv2d): A PyTorch Conv2d layer instance.
+
+        Returns:
+            Data: A torch_geometric.data.Data object representing the convolutional layer.
+        """
+        assert isinstance(layer, nn.Linear), "Make sure layer is nn.Linear."
+        # Extract weights and biases
+        weight = layer.weight  # Shape: [out_channels, in_channels, kh, kw]
+        bias = layer.bias      # Shape: [out_channels] or None
+
+        out_channels, in_channels, kh, kw = weight.shape
+
+        # Nodes: input and output channels
+        node_features = []
+
+        # Calculate node features as statistics for each input channel
+        for c in range(in_channels):
+            channel_weights = weight[:, c, :, :].flatten()  # All weights related to this input channel
+            node_features.append([channel_weights.mean().item(), channel_weights.std().item()])  # Mean and std
+
+        node_features = torch.tensor(node_features, dtype=torch.float32)  # Shape [in_channels, 2]
+
+        # Edges: connections between input and output channels
+        edge_index = []
+        edge_attr = []
+
+        for out_channel in range(out_channels):
+            for in_channel in range(in_channels):
+                kernel_weights = weight[out_channel, in_channel].flatten()  # Kernel weights for this connection
+                edge_index.append([in_channel, in_channels + out_channel])  # Edge: input -> output
+                edge_attr.append(kernel_weights.tolist())  # Flattened kernel weights
+
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t()  # Shape [2, num_edges]
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float32)  # Shape [num_edges, kh * kw]
+
+        # Add bias as an additional edge attribute (optional)
+        if bias is not None:
+            for out_channel in range(out_channels):
+                edge_attr[out_channel::out_channels, :] += bias[out_channel].item()
+
+        # Create the Data object
+        data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
+        data.layer_name = layer.name  # Store the layer name for debugging
+        data.layer_index = layer.index
+        return data
+
+    def graphb(self, verbose:bool=True):
+        for node in self.graphb_nodes:
+            if isinstance(node, nn.Conv2d):
+                self.graph_B.append(self.conv_to_graph(node))
+            elif isinstance(node, nn.Linear):
+                self.graph_B.append(self.mlp_to_graph(node))
+        return self.graph_B
+
 
 if __name__ == '__main__':
     from models import get_model

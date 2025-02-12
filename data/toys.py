@@ -1,6 +1,6 @@
 from base import BaseDataSet
 import torchvision.datasets as datasets
-from collections import defaultdict
+from config import CONF
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -12,10 +12,10 @@ DATASET_MAP = {
         }
 
 ARG_MAP = {
-        'cifar10': {'root': "./raw_data", 'train': True, 'download': True},
-        'cifar100': {'root': "./raw_data", 'train': True, 'download': True},
-        'mnist': {'root': "./raw_data", 'train': True, 'download': True},
-        'fashionmnist': {'root': "./raw_data", 'train': True, 'download': True},
+        'cifar10': {'root': CONF.data_root_path, 'train': True, 'download': True},
+        'cifar100': {'root': CONF.data_root_path, 'train': True, 'download': True},
+        'mnist': {'root': CONF.data_root_path, 'train': True, 'download': True},
+        'fashionmnist': {'root': CONF.data_root_path, 'train': True, 'download': True},
 }
 
 META_MAP = {

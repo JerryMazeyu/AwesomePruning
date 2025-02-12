@@ -1,1 +1,1 @@
-from .classification import *
+from .model_zoo import *

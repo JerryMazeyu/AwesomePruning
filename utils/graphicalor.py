@@ -5,7 +5,8 @@ from sentence_transformers import SentenceTransformer
 import torch_geometric as tg
 from torch_geometric.data import Data
 from typing import Optional, Union
-from utils.io import LogRedirectMixin, log, generate_name
+from utils.io import LogRedirectMixin, log
+from utils.inspector import ModelInspector
 from torch.fx import symbolic_trace
 import numpy as np
 
@@ -23,7 +24,7 @@ class Graphicalor(LogRedirectMixin):
         self.traced = symbolic_trace(self.network)
         self.extract_nodes_and_edges()
     
-    def _get_layer(self, name:str, verbose=True) -> nn.Module:
+    def _get_layer(self, name:str, verbose:bool=True) -> nn.Module:
         """Get a specific layer of model.
 
         Args:
@@ -95,6 +96,7 @@ class Graphicalor(LogRedirectMixin):
             'tanh': 'Tanh function',
             'other': 'Other operator',
         }
+        
         def get_key(name):
             for k in mapping.keys():
                 if k in str(name).lower():
@@ -123,9 +125,7 @@ class Graphicalor(LogRedirectMixin):
         embbeding = torch.tensor(self.embedding_model.encode(description))
         return embbeding
     
-        pass
-    
-    def extract_parameter_features(self, parameters):
+    def extract_parameter_features(self, parameters:dict):
         """
         Extract fixed-length features from node parameters as a torch.Tensor.
 
@@ -347,6 +347,29 @@ class Graphicalor(LogRedirectMixin):
             elif isinstance(node, nn.Linear):
                 self.graph_B.append(self.mlp_to_graph(node))
         return self.graph_B
+
+
+class TransformerGraphicalor(LogRedirectMixin, ModelInspector):
+    def __init__(self, model:nn.Module, log_path:Optional[str]=None) -> None:
+        super().__init__(model, log_path)
+        self.layer_level_graph = None
+        self.attention_level_graph = []
+    
+    def _get_statistics(self, tensor:torch.Tensor) -> torch.Tensor:
+        pass
+    def _get_layer_node_representation(self, layer:nn.Module, input_tensor:torch.Tensor) -> torch.Tensor:
+        """
+        Get the node representation for a transformer layer.
+
+        Args:
+            layer (nn.Module): A transformer layer.
+            input_tensor (torch.Tensor): A tensor representing the input to the layer.
+
+        Returns:
+            torch.Tensor: A representation of the layer as a node in the graph.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+    
 
 
 if __name__ == '__main__':

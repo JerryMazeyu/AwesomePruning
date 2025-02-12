@@ -358,6 +358,7 @@ class LogRedirectMixin:
     def __init__(self, log_path: str=None):
         if not log_path:
             log_path = os.path.join(root(), 'experiments', generate_name())
+            self.log_path = log_path
         flag = soft_mkdir(log_path)
         if not flag:
             raise Warning("Log path already exists.")

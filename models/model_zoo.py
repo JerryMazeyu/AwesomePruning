@@ -77,4 +77,3 @@ if __name__ == "__main__":
     os.environ['REQUESTS_CA_BUNDLE'] = ''
     res = 'Llama-2-7b-hf'
     m = get_model(model_name=res, cache_dir='/mnt/share_data')
-    print(m)

@@ -185,20 +185,91 @@ class ModelInspector(LogRedirectMixin):
         elif self.model._model_type == 'LM':
             llm_summary(self.model, seq_len=128, batch_size=2, device=CONF.device)
         
-    def calibrate(self, calibration_dataset:torch.utils.data.Dataset, batch_size:int=32):
-        """Calibrate model with a dataset.
+    def calibrate(self, calibration_dataset: torch.utils.data.Dataset, batch_size: int = 32, task_type: str = None, loss_fns=None, loss_weights=None):
+        """Perform one forward and backward pass on calibration dataset to obtain model gradients.
 
         Args:
-            calibration_dataset (torch.utils.data.Dataset): Calibration dataset.
+            calibration_dataset (torch.utils.data.Dataset): Dataset for calibration
             batch_size (int, optional): Batch size. Defaults to 32.
+            task_type (str, optional): Task type. If None, will be inferred from model type. 
+                Available values: 'classification', 'language_modeling', 'sequence_classification', etc.
+            loss_fns (list, optional): List of loss functions.
+            loss_weights (list, optional): List of loss weights.
         """
-        self.model.eval()
-        with torch.no_grad():
-            for i, (inp, _) in enumerate(calibration_dataset):
-                if i == 0:
-                    self.model(inp.cuda())
-                else:
-                    self.model(inp.cuda())
+        if task_type is None:
+            task_type = self._infer_task_type()
+        
+        dataloader = torch.utils.data.DataLoader(
+            calibration_dataset, 
+            batch_size=batch_size,
+            shuffle=True
+        )
+        
+        self.model.train()  # Ensure model is in training mode
+        
+        # Get one batch of data
+        batch = next(iter(dataloader))
+        
+        # Process data and compute loss based on task type
+        if task_type == 'classification':
+            inputs, labels = batch
+            inputs = inputs.to(CONF.device)
+            labels = labels.to(CONF.device)
+            outputs = self.model(inputs)
+            loss = nn.CrossEntropyLoss()(outputs, labels)
+        
+        elif task_type == 'language_modeling':
+            # For language models (e.g., LLaMA)
+            inputs = batch
+            if isinstance(inputs, dict):
+                inputs = {k: v.to(CONF.device) for k, v in inputs.items()}
+                outputs = self.model(**inputs)
+            else:
+                inputs = inputs.to(CONF.device)
+                outputs = self.model(inputs)
+            # Compute loss for language model
+            if hasattr(outputs, 'loss'):
+                loss = outputs.loss
+            else:
+                # Manually compute loss if not provided in outputs
+                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                shift_labels = inputs['input_ids'][..., 1:].contiguous()
+                loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), 
+                                            shift_labels.view(-1))
+        
+        # Backward pass
+        loss.backward()
+        
+        # Update status
+        self.status = 'trained'
+
+        if loss_fns is None:
+            # 使用默认loss
+            pass
+        else:
+            total_loss = 0
+            for fn, weight in zip(loss_fns, loss_weights):
+                total_loss += weight * fn(outputs, labels)
+
+    def _infer_task_type(self):
+        """Infer task type based on model characteristics"""
+        if hasattr(self.model, '_model_type'):
+            if self.model._model_type == 'CNN':
+                return 'classification'
+            elif self.model._model_type == 'LM':
+                return 'language_modeling'
+        
+        # Try to infer from model structure if no explicit model type is marked
+        if hasattr(self.model, 'config'):
+            if hasattr(self.model.config, 'problem_type'):
+                return self.model.config.problem_type
+            elif hasattr(self.model.config, 'architectures'):
+                if any('ForCausalLM' in arch for arch in self.model.config.architectures):
+                    return 'language_modeling'
+                elif any('ForSequenceClassification' in arch for arch in self.model.config.architectures):
+                    return 'sequence_classification'
+        
+        raise ValueError("Cannot infer task type, please specify task_type parameter explicitly")
     
     def get_layer(self, name:str, verbose=True) -> nn.Module:
         """Get a specific layer of model.

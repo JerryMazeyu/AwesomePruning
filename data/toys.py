@@ -1,4 +1,4 @@
-from base import BaseDataSet
+from .base import BaseDataSet
 import torchvision.datasets as datasets
 from config import CONF
 import warnings

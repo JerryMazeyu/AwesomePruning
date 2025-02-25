@@ -65,9 +65,23 @@ def get_model(model_name:str, pretrained:bool=True, num_classes:int=1000, *args,
         setattr(model, '_model_type', 'LM')
         return model, tokenizer
     elif model_name in CNN_MODELS_MAP.keys():
-        model = model_list(model_name)
+        model_fn = CNN_MODELS_MAP[model_name]  # Get model function
+        model = model_fn(pretrained=pretrained)  # Initialize with pretrained weights
+
+        # If the number of classes is not 1000, modify the last fully connected layer
+        if num_classes != 1000:
+            import torch.nn as nn
+            # For different model architectures, you may need different ways to modify the last fully connected layer
+            if model_name.startswith('resnet'):
+                model.fc = nn.Linear(model.fc.in_features, num_classes)
+            elif model_name.startswith('densenet'):
+                model.classifier = nn.Linear(model.classifier.in_features, num_classes)
+            elif model_name.startswith('vgg') or model_name == 'alexnet':
+                model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
+            
+        
         setattr(model, '_model_type', 'CNN')
-        return model(pretrained=pretrained, num_classes=num_classes, *args, **kwargs)
+        return model
 
 
 if __name__ == "__main__":

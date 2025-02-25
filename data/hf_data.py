@@ -1,26 +1,26 @@
-from base import BaseDataSet
+from .base import BaseDataSet
 from datasets import load_dataset
 from config import CONF
 import warnings
 import os
 warnings.filterwarnings("ignore")
 
-# 定义常用的HuggingFace数据集映射
+# Define commonly used HuggingFace dataset mappings
 DATASET_MAP = {
-    # 文本分类数据集
+    # Text classification datasets
     'imdb': 'imdb',
     'sst2': 'glue/sst2',
     'mnli': 'glue/mnli',
-    # 语言建模数据集
+    # Language modeling datasets
     'wikitext2': 'wikitext/wikitext-2-raw-v1',
     'wikitext103': 'wikitext/wikitext-103-raw-v1',
     'c4': 'c4',
-    # 问答数据集
+    # Question answering datasets
     'squad': 'squad',
     'squad_v2': 'squad_v2'
 }
 
-# 数据集参数映射
+# Dataset parameter mappings
 ARG_MAP = {
     'imdb': {'split': 'train'},
     'sst2': {'split': 'train'},
@@ -32,7 +32,7 @@ ARG_MAP = {
     'squad_v2': {'split': 'train'}
 }
 
-# 数据集元信息
+# Dataset metadata
 META_MAP = {
     'imdb': {
         'task_type': 'sequence_classification',
@@ -55,46 +55,46 @@ META_MAP = {
 }
 
 def get_cache_path(dataset_name: str) -> str:
-    """获取数据集的本地缓存路径
+    """Get the local cache path for the dataset
 
     Args:
-        dataset_name (str): 数据集名称
+        dataset_name (str): Dataset name
 
     Returns:
-        str: 缓存路径
+        str: Cache path
     """
-    # 将数据集名称中的'/'替换为'_'以创建有效的文件路径
+    # Replace '/' in dataset name with '_' to create a valid file path
     safe_name = dataset_name.replace('/', '_')
     return os.path.join(CONF.data_root_path, 'hf_datasets', safe_name)
 
 def dataset_list(name: str = None, **kwargs):
-    """获取数据集列表或指定数据集
+    """Get dataset list or a specific dataset
 
     Args:
-        name (str, optional): 数据集名称，如果为None则返回所有可用数据集列表. Defaults to None.
+        name (str, optional): Dataset name, returns all available datasets if None. Defaults to None.
 
     Returns:
-        Union[list, Dataset]: 数据集列表或指定的数据集
+        Union[list, Dataset]: Dataset list or the specified dataset
     """
     if not name:
         return list(DATASET_MAP.keys())
     else:
         if name not in DATASET_MAP:
-            raise ValueError(f"数据集 {name} 不在支持列表中。支持的数据集: {list(DATASET_MAP.keys())}")
+            raise ValueError(f"Dataset {name} is not in the supported list. Supported datasets: {list(DATASET_MAP.keys())}")
         
-        # 更新参数
+        # Update parameters
         args = ARG_MAP[name].copy()
         args.update(kwargs)
         
-        # 获取缓存路径
+        # Get cache path
         cache_dir = get_cache_path(DATASET_MAP[name])
         
-        # 确保缓存目录存在
+        # Ensure cache directory exists
         os.makedirs(cache_dir, exist_ok=True)
         
-        # 加载数据集
+        # Load dataset
         try:
-            # 添加cache_dir参数以启用本地缓存
+            # Add cache_dir parameter to enable local caching
             dataset = load_dataset(
                 DATASET_MAP[name],
                 cache_dir=cache_dir,
@@ -102,7 +102,7 @@ def dataset_list(name: str = None, **kwargs):
             )
             
             if isinstance(dataset, dict):
-                # 某些数据集可能返回DatasetDict，我们获取指定的split
+                # Some datasets may return DatasetDict, we get the specified split
                 split = args.get('split', 'train')
                 dataset = dataset[split]
             
@@ -110,32 +110,32 @@ def dataset_list(name: str = None, **kwargs):
             return dataset
             
         except Exception as e:
-            raise Exception(f"加载数据集 {name} 时发生错误: {str(e)}")
+            raise Exception(f"Error occurred while loading dataset {name}: {str(e)}")
 
 def get_dataset(dt_name: str, **kwargs):
-    """获取指定的数据集及其元信息
+    """Get the specified dataset and its metadata
 
     Args:
-        dt_name (str): 数据集名称
-        **kwargs: 其他参数
+        dt_name (str): Dataset name
+        **kwargs: Other parameters
 
     Returns:
-        BaseDataSet: 包装后的数据集
+        BaseDataSet: Wrapped dataset
     """
     dt = dataset_list(dt_name, **kwargs)
     meta = META_MAP.get(dt_name, {})
     return BaseDataSet(dt, meta)
 
 if __name__ == "__main__":
-    # 测试代码
-    print("可用数据集列表:", dataset_list())
+    # Test code
+    print("Available dataset list:", dataset_list())
     
-    # 测试加载IMDB数据集
-    print("\n加载IMDB数据集...")
+    # Test loading IMDB dataset
+    print("\nLoading IMDB dataset...")
     imdb_dataset = get_dataset('imdb')
-    print("IMDB数据集元信息:", imdb_dataset.meta)
+    print("IMDB dataset metadata:", imdb_dataset.meta)
     
-    # 测试加载WikiText-2数据集
-    print("\n加载WikiText-2数据集...")
+    # Test loading WikiText-2 dataset
+    print("\nLoading WikiText-2 dataset...")
     wiki_dataset = get_dataset('wikitext2')
-    print("WikiText-2数据集元信息:", wiki_dataset.meta) 
+    print("WikiText-2 dataset metadata:", wiki_dataset.meta) 

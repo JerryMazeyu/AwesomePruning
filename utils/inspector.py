@@ -10,14 +10,6 @@ from utils.io import LogRedirectMixin, log, generate_name
 from config import CONF
 from collections import OrderedDict
 
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-LLM 版本的 summary 函数
-该函数用于打印 LLM（例如 LlamaForCausalLM）模型的各层输入/输出形状、参数数量等信息，
-适用于输入为字典形式的模型。
-"""
-
 import torch
 import torch.nn as nn
 import numpy as np
@@ -25,7 +17,7 @@ from collections import OrderedDict
 
 def format_params(n):
     """
-    将参数数量 n 转换为更易读的格式，例如：
+    Convert parameter count n to a more readable format, e.g.:
       1234 -> "1.23K"
       1234567 -> "1.23M"
       1234567890 -> "1.23B"
@@ -54,15 +46,15 @@ def llm_summary(model, seq_len, batch_size=1, device="cuda"):
     """
     device = device.lower()
 
-    # 获取模型配置中的 vocab_size（如果有），否则默认 1000
+    # Get vocab_size from model config, default to 1000 if not found
     vocab_size = getattr(model.config, "vocab_size", 1000)
     
-    # 构造 dummy 输入：输入的 token_ids 为随机整数，attention_mask 全为 1
+    # Construct dummy input: token_ids are random integers, attention_mask is all 1s
     input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=torch.long).to(device)
     attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long).to(device)
     dummy_input = {"input_ids": input_ids, "attention_mask": attention_mask}
     
-    # 用于保存各层信息的 OrderedDict
+    # OrderedDict to save information for each layer
     summary_dict = OrderedDict()
     hooks = []
 
@@ -74,7 +66,7 @@ def llm_summary(model, seq_len, batch_size=1, device="cuda"):
                 first_input = input[0]
             except IndexError:
                 return
-            # 如果 input 是以字典形式传入，则取其中 "input_ids" 的张量
+            # If input is passed as a dictionary, take the "input_ids" tensor
             if isinstance(first_input, dict):
                 inp_tensor = first_input.get("input_ids", None)
                 if inp_tensor is None:
@@ -87,20 +79,20 @@ def llm_summary(model, seq_len, batch_size=1, device="cuda"):
             m_key = f"{class_name}-{module_idx + 1}"
             summary_dict[m_key] = OrderedDict()
 
-            # 记录输入形状
+            # Record input shape
             summary_dict[m_key]["input_shape"] = list(inp_tensor.size())
-            summary_dict[m_key]["input_shape"][0] = batch_size  # 设置 batch_size
+            summary_dict[m_key]["input_shape"][0] = batch_size  # Set batch_size
 
-            # 记录输出形状
+            # Record output shape
             if isinstance(output, (list, tuple)):
-                # 如果输出为 tuple，则取第一个张量
+                # If output is a tuple, take the first tensor
                 out_tensor = output[0]
             else:
                 out_tensor = output
             summary_dict[m_key]["output_shape"] = list(out_tensor.size())
             summary_dict[m_key]["output_shape"][0] = batch_size
 
-            # 计算参数数量
+            # Calculate parameter count
             params = 0
             if hasattr(module, "weight") and hasattr(module.weight, "size"):
                 params += torch.prod(torch.tensor(list(module.weight.size()), dtype=torch.long)).item()
@@ -109,23 +101,23 @@ def llm_summary(model, seq_len, batch_size=1, device="cuda"):
                 params += torch.prod(torch.tensor(list(module.bias.size()), dtype=torch.long)).item()
             summary_dict[m_key]["nb_params"] = params
 
-        # 对于非容器模块以及模型本身，注册 hook
+        # Register hook for non-container modules and the model itself
         if not isinstance(module, nn.Sequential) and not isinstance(module, nn.ModuleList) and (module != model):
             hooks.append(module.register_forward_hook(hook))
 
-    # 在模型上注册 hook
+    # Register hooks on the model
     model.apply(register_hook)
 
-    # 进行一次前向传播
+    # Perform one forward pass
     model.eval()
     with torch.no_grad():
         model(**dummy_input)
 
-    # 移除 hook
+    # Remove hooks
     for h in hooks:
         h.remove()
 
-    # 打印摘要信息
+    # Print summary information
     print("----------------------------------------------------------------")
     line_new = "{:>20}  {:>25} {:>15}".format("Layer (type)", "Output Shape", "Param #")
     print(line_new)
@@ -152,7 +144,7 @@ def llm_summary(model, seq_len, batch_size=1, device="cuda"):
     print("Non-trainable params: {} ({})".format(total_params - trainable_params, format_params(total_params - trainable_params)))
     print("----------------------------------------------------------------")
 
-    # 估算内存占用（单位：MB）
+    # Estimate memory usage (in MB)
     total_input_size = abs(np.prod([batch_size, seq_len]) * 4.0 / (1024 ** 2))
     total_output_size = abs(2.0 * total_output * 4.0 / (1024 ** 2))  # x2 for gradients
     total_params_size = abs(total_params * 4.0 / (1024 ** 2))
@@ -180,11 +172,45 @@ class ModelInspector(LogRedirectMixin):
         Args:
             mock_inp (tuple, optional): Mock input tensor shape. Defaults to (3,224,224).
         """
-        if self.model._model_type == 'CNN':
-            summary(self.model, mock_inp, device=next(self.model.parameters()).device.type)
-        elif self.model._model_type == 'LM':
-            llm_summary(self.model, seq_len=128, batch_size=2, device=CONF.device)
+        try:
+            if self.model._model_type == 'CNN':
+                # 尝试将整个模型移动到CPU以避免设备不一致问题
+                try:
+                    # 保存原始设备以便之后恢复
+                    original_device = next(self.model.parameters()).device
+                    self.model = self.model.cpu()
+                    summary(self.model, mock_inp, device='cpu')
+                    # 操作完成后将模型移回原设备
+                    self.model = self.model.to(original_device)
+                except Exception as e:
+                    print(f"Error during model summary on CPU: {e}")
+                    # 如果CPU摘要失败，则打印基本信息
+                    self._print_model_info()
+            elif self.model._model_type == 'LM':
+                llm_summary(self.model, seq_len=128, batch_size=2, device=CONF.device)
+        except Exception as e:
+            print(f"Warning: Could not generate summary: {e}")
+            self._print_model_info()
+
+    def _print_model_info(self):
+        """Print basic model information when detailed summary fails."""
+        print("\nModel basic information:")
+        print(f"Model type: {self.model._model_type}")
+        print(f"Model class: {self.model.__class__.__name__}")
         
+        # Count parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        
+        print(f"Total parameters: {format_params(total_params)}")
+        print(f"Trainable parameters: {format_params(trainable_params)}")
+        
+        # Print top-level modules
+        print("\nTop-level modules:")
+        for name, module in self.model.named_children():
+            params = sum(p.numel() for p in module.parameters())
+            print(f"  {name}: {module.__class__.__name__} - {format_params(params)} parameters")
+
     def calibrate(self, calibration_dataset: torch.utils.data.Dataset, batch_size: int = 32, task_type: str = None, loss_fns=None, loss_weights=None):
         """Perform one forward and backward pass on calibration dataset to obtain model gradients.
 
@@ -363,7 +389,13 @@ class ModelInspector(LogRedirectMixin):
         num_rows = ceil(num_tensors / num_cols)
         
         fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 15))
-        axes = axes.flatten()
+        
+        # 处理单个子图的情况
+        if num_rows == 1 and num_cols == 1:
+            axes = [axes]  # 将单个Axes对象包装成列表
+        else:
+            # 将多维数组展平为一维
+            axes = axes.flatten() if hasattr(axes, 'flatten') else axes.reshape(-1)
         
         for i, tensor in enumerate(tensors):
             flattened_tensor = tensor.flatten().detach().cpu().numpy()
@@ -373,25 +405,73 @@ class ModelInspector(LogRedirectMixin):
             axes[i].set_ylabel('Frequency')
             axes[i].grid(True)
         
-        for j in range(i + 1, num_rows * num_cols):
-            fig.delaxes(axes[j])
+        # 只有在有多个子图的情况下才需要删除多余的子图
+        if len(axes) > i + 1:
+            for j in range(i + 1, len(axes)):
+                fig.delaxes(axes[j])
         
         plt.tight_layout()
-        plt.savefig(os.path.join(self.log_path, save_path))
+        plt.savefig(os.path.join(self.log_path if hasattr(self, 'log_path') else '.', save_path))
 
 
 
 if __name__ == "__main__":
-    import sys
-    sys.path.append("/home/ubuntu/mzy/AwesomePruning")
-    from models import get_model
+    from data import get_dataset
+    from models.model_zoo import get_model
     
+    # Test CV model with CIFAR-10 dataset
+    print("\n" + "="*50)
+    print("TESTING CV MODEL WITH TOY DATASET")
+    print("="*50)
+    
+    # Get CIFAR-10 dataset
+    cifar10 = get_dataset('cifar10', train=True)
+    print(f"CIFAR-10 dataset loaded, size: {len(cifar10)}")
+    
+    # Get ResNet18 model
+    resnet18 = get_model('resnet18', pretrained=True, num_classes=10)
+    resnet18.to(CONF.device)
+    print(f"ResNet18 model loaded on {CONF.device}")
+    
+    # Use ModelInspector to check model
+    cv_inspector = ModelInspector(resnet18)
+    cv_inspector.summary((3, 32, 32))
+    
+    # Check specific layer
+    cv_layer = 'layer1.0.conv1'
+    layer = cv_inspector.get_layer(cv_layer)
+    params = cv_inspector.get_para(cv_layer)
+    cv_inspector.plot_histogram(params, save_path='resnet18_params.png')
+    
+    # Test NLP model with IMDB dataset
+    print("\n" + "="*50)
+    print("TESTING LLM MODEL WITH HUGGINGFACE DATASET")
+    print("="*50)
+    
+    # Get IMDB dataset
+    imdb = get_dataset('imdb')
+    print(f"IMDB dataset loaded, size: {len(imdb)}")
+    
+    # Get Llama model (or use a smaller model like GPT-2)
     llama2, tokenizer = get_model('Llama-2-7b-hf', cache_dir=CONF.cache_dir)
-    llama2.to(CONF.device)    
-    mp = ModelInspector(llama2)
-    mp.summary()
-    tar = 'model.layers.0.self_attn'
-    layer = mp.get_layer(tar)
-    tl = mp.get_para(tar)
-    mp.plot_histogram(tl)
-    mp.get_grad(tar)
+    
+    # Try to move model to GPU
+    try:
+        llama2.to(CONF.device)
+        print(f"LLM model loaded on {CONF.device}")
+    except RuntimeError as e:
+        print(f"Model too large for {CONF.device}, keeping on CPU: {e}")
+    
+    # Use ModelInspector to check model
+    nlp_inspector = ModelInspector(llama2)
+    nlp_inspector.summary()
+    
+    # Check specific layer
+    nlp_layer = 'model.layers.0.self_attn'
+    layer = nlp_inspector.get_layer(nlp_layer)
+    params = nlp_inspector.get_para(nlp_layer)
+    
+    # Only take the first two parameters to plot histogram, avoid memory issues
+    nlp_inspector.plot_histogram(params[:2], save_path='llama_params.png')
+    
+    print("\nTesting completed!")

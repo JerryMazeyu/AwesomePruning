@@ -6,3 +6,4 @@ raw_data/
 *.png
 debug.py
 experiments/
+.cursor/

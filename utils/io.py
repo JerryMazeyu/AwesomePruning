@@ -11,6 +11,7 @@ def root():
             return p
     else:
         raise ValueError('Cannot find root path of the project')
+    
 def generate_name() -> str:
     """Random generate a name.
 
@@ -360,9 +361,12 @@ class LogRedirectMixin:
             log_path = os.path.join(root(), 'experiments', generate_name())
             self.log_path = log_path
         flag = soft_mkdir(log_path)
-        if not flag:
-            raise Warning("Log path already exists.")
         self.log_file_path = os.path.join(log_path, 'log.txt')
+        if not flag:
+            print("Log path already exists.")
+            name = str(self.__class__).replace("<class '", "").replace("'>", "")
+            self.log_file_path = os.path.join(log_path, f'log_{name}.txt')
+            # raise Warning("Log path already exists.")
         print(f"[INFO] Log saved in {log_path}")
         self._wrap_methods()
     

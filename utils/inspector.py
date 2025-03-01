@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from collections import OrderedDict
-
+from typing import Callable
 def format_params(n):
     """
     Convert parameter count n to a more readable format, e.g.:
@@ -159,9 +159,12 @@ def llm_summary(model, seq_len, batch_size=1, device="cuda"):
 
 
 class ModelInspector(LogRedirectMixin):
-    def __init__(self, model:nn.Module, log_path:Optional[str]=None) -> None:
+    def __init__(self, model:nn.Module, tokenizer:Optional[Callable]=None, log_path:Optional[str]=None) -> None:
         super().__init__(log_path)
         self.model = model
+        self.tokenizer = tokenizer
+        if self.model._model_type == 'LM':
+            assert tokenizer is not None, ValueError("Tokenizer is required for language modeling tasks.")
         self.status = 'blank'  # blank, trained
         if log_path:
             self.log_path = log_path
@@ -211,7 +214,7 @@ class ModelInspector(LogRedirectMixin):
             params = sum(p.numel() for p in module.parameters())
             print(f"  {name}: {module.__class__.__name__} - {format_params(params)} parameters")
 
-    def calibrate(self, calibration_dataset: torch.utils.data.Dataset, batch_size: int = 32, task_type: str = None, loss_fns=None, loss_weights=None):
+    def calibrate(self, calibration_dataset: torch.utils.data.Dataset, batch_size: int = 2, task_type: str = None, loss_fns=None, loss_weights=None):
         """Perform one forward and backward pass on calibration dataset to obtain model gradients.
 
         Args:
@@ -244,12 +247,46 @@ class ModelInspector(LogRedirectMixin):
             outputs = self.model(inputs)
             loss = nn.CrossEntropyLoss()(outputs, labels)
         
-        elif task_type == 'language_modeling':
+        elif task_type == 'sequence_classification':
+            inputs, labels = batch['input_ids'], batch['labels']
+            if isinstance(inputs, torch.Tensor):
+                inputs = inputs.to(CONF.device)
+            elif isinstance(inputs, list) and isinstance(inputs[0], str):
+                inputs = self.tokenizer(inputs, return_tensors='pt', padding=True, truncation=True)
+                inputs = inputs.to(CONF.device)
+            else:
+                raise ValueError(f"Unsupported input format: {type(inputs)}")
+            if isinstance(labels, torch.Tensor):
+                labels = labels.to(CONF.device)
+            outputs = self.model(**inputs)
+            last_logits = outputs.logits[:, -1, :]
+            loss = nn.CrossEntropyLoss()(last_logits, labels)
+        
+        elif task_type == 'language_modeling':  # TODO: NOT TESTED
             # For language models (e.g., LLaMA)
             inputs = batch
             if isinstance(inputs, dict):
                 inputs = {k: v.to(CONF.device) for k, v in inputs.items()}
                 outputs = self.model(**inputs)
+            elif isinstance(inputs, list):
+                # Process list type input
+                try:
+                    # Try to convert list directly to tensor
+                    inputs_tensor = torch.tensor(inputs).to(CONF.device)
+                    outputs = self.model(inputs_tensor)
+                except Exception as e:
+                    log(f"Cannot process inputs: {e}", level="ERROR")
+                    # Try to get the first element (if it's a dictionary)
+                    if len(inputs) > 0 and isinstance(inputs[0], dict):
+                        first_item = inputs[0]
+                        input_ids = first_item.get('input_ids', first_item.get('text', None))
+                        if input_ids is not None:
+                            input_ids = torch.tensor([input_ids]).to(CONF.device)
+                            outputs = self.model(input_ids)
+                        else:
+                            raise ValueError(f"Cannot extract valid data from list input: {inputs[0]}")
+                    else:
+                        raise ValueError(f"Unsupported list input format: {inputs}")
             else:
                 inputs = inputs.to(CONF.device)
                 outputs = self.model(inputs)
@@ -270,20 +307,29 @@ class ModelInspector(LogRedirectMixin):
         self.status = 'trained'
 
         if loss_fns is None:
-            # 使用默认loss
             pass
         else:
             total_loss = 0
             for fn, weight in zip(loss_fns, loss_weights):
                 total_loss += weight * fn(outputs, labels)
 
-    def _infer_task_type(self):
+    def _infer_task_type(self, dataset:torch.utils.data.Dataset=None):
         """Infer task type based on model characteristics"""
         if hasattr(self.model, '_model_type'):
             if self.model._model_type == 'CNN':
                 return 'classification'
             elif self.model._model_type == 'LM':
-                return 'language_modeling'
+                if dataset is not None:
+                    dt = next(iter(dataset))
+                    if isinstance(dt, dict):
+                        if 'input_ids' in dt:
+                            return 'sequence_classification'
+                        elif 'text' in dt:
+                            return 'language_modeling'
+                    else:
+                        raise ValueError(f"Unsupported dataset format: {type(dt)}")
+                else:
+                    return 'language_modeling'
         
         # Try to infer from model structure if no explicit model type is marked
         if hasattr(self.model, 'config'):
@@ -363,7 +409,7 @@ class ModelInspector(LogRedirectMixin):
         if isinstance(layer, str):
             layer = self.get_layer(layer, verbose=False)
         for name, para in layer.named_parameters():
-            if para.grad:
+            if para.grad is not None:
                 gradients[name] = para.grad
                 if verbose:
                     log(f"Name {name}: shape {list(para.shape)}, min value {torch.min(para.grad).item()}, max value {torch.max(para.grad).item()}.")
@@ -419,29 +465,29 @@ if __name__ == "__main__":
     from data import get_dataset
     from models.model_zoo import get_model
     
-    # Test CV model with CIFAR-10 dataset
-    print("\n" + "="*50)
-    print("TESTING CV MODEL WITH TOY DATASET")
-    print("="*50)
+    # # Test CV model with CIFAR-10 dataset
+    # print("\n" + "="*50)
+    # print("TESTING CV MODEL WITH TOY DATASET")
+    # print("="*50)
     
-    # Get CIFAR-10 dataset
-    cifar10 = get_dataset('cifar10', train=True)
-    print(f"CIFAR-10 dataset loaded, size: {len(cifar10)}")
+    # # Get CIFAR-10 dataset
+    # cifar10 = get_dataset('cifar10', train=True)
+    # print(f"CIFAR-10 dataset loaded, size: {len(cifar10)}")
     
-    # Get ResNet18 model
-    resnet18 = get_model('resnet18', pretrained=True, num_classes=10)
-    resnet18.to(CONF.device)
-    print(f"ResNet18 model loaded on {CONF.device}")
+    # # Get ResNet18 model
+    # resnet18 = get_model('resnet18', pretrained=True, num_classes=10)
+    # resnet18.to(CONF.device)
+    # print(f"ResNet18 model loaded on {CONF.device}")
     
-    # Use ModelInspector to check model
-    cv_inspector = ModelInspector(resnet18)
-    cv_inspector.summary((3, 32, 32))
+    # # Use ModelInspector to check model
+    # cv_inspector = ModelInspector(resnet18)
+    # cv_inspector.summary((3, 32, 32))
     
-    # Check specific layer
-    cv_layer = 'layer1.0.conv1'
-    layer = cv_inspector.get_layer(cv_layer)
-    params = cv_inspector.get_para(cv_layer)
-    cv_inspector.plot_histogram(params, save_path='resnet18_params.png')
+    # # Check specific layer
+    # cv_layer = 'layer1.0.conv1'
+    # layer = cv_inspector.get_layer(cv_layer)
+    # params = cv_inspector.get_para(cv_layer)
+    # cv_inspector.plot_histogram(params, save_path='resnet18_params.png')
     
     # Test NLP model with IMDB dataset
     print("\n" + "="*50)
@@ -463,7 +509,7 @@ if __name__ == "__main__":
         print(f"Model too large for {CONF.device}, keeping on CPU: {e}")
     
     # Use ModelInspector to check model
-    nlp_inspector = ModelInspector(llama2)
+    nlp_inspector = ModelInspector(llama2, tokenizer)
     nlp_inspector.summary()
     
     # Check specific layer

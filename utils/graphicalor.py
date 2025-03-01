@@ -1,14 +1,37 @@
 import os
 import torch
 import torch.nn as nn
-from sentence_transformers import SentenceTransformer
-import torch_geometric as tg
-from torch_geometric.data import Data
-from typing import Optional, Union
+import transformers
+from typing import Optional, Union, Callable, Tuple
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMER_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMER_AVAILABLE = False
+    print("Warning: sentence_transformers package not available. Some embedding features will be disabled.")
+try:
+    import torch_geometric as tg
+    from torch_geometric.data import Data
+    TORCH_GEOMETRIC_AVAILABLE = True
+except ImportError:
+    TORCH_GEOMETRIC_AVAILABLE = False
+    print("Warning: torch_geometric package not available. Graph creation features will be disabled.")
+    # 创建虚拟Data类
+    class Data:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+try:
+    from torch.fx import symbolic_trace
+    TORCH_FX_AVAILABLE = True
+except ImportError:
+    TORCH_FX_AVAILABLE = False
+    print("Warning: torch.fx not available. Graph visualization features will be limited.")
+
 from utils.io import LogRedirectMixin, log
 from utils.inspector import ModelInspector
-from torch.fx import symbolic_trace
-import numpy as np
+
+
 
 
 
@@ -16,13 +39,36 @@ class Graphicalor(LogRedirectMixin):
     def __init__(self, network:nn.Module, embedding_model:nn.Module = None, log_path:Optional[str] = None) -> None:
         super().__init__(log_path)
         self.network = network
-        if not embedding_model:
+        self.embedding_model = None
+        
+        if embedding_model:
+            self.embedding_model = embedding_model
+        elif SENTENCE_TRANSFORMER_AVAILABLE:
             log("No embedding model provided. Using default model: all-MiniLM-L6-v2.", level="WARNING")
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        else:
+            log("SentenceTransformer not available. Using dummy embedding.", level="WARNING")
+            
         self.graph_A = None
         self.graph_B = []
-        self.traced = symbolic_trace(self.network)
-        self.extract_nodes_and_edges()
+        
+        # 处理不存在torch.fx的情况
+        if TORCH_FX_AVAILABLE:
+            try:
+                self.traced = symbolic_trace(self.network)
+                self.extract_nodes_and_edges()
+            except Exception as e:
+                log(f"无法使用torch.fx进行符号跟踪: {e}", level="ERROR")
+                self.traced = None
+                self.nodes = {}
+                self.edges = []
+                self.graphb_nodes = []
+        else:
+            log("torch.fx不可用，无法进行符号跟踪", level="WARNING")
+            self.traced = None
+            self.nodes = {}
+            self.edges = []
+            self.graphb_nodes = []
     
     def _get_layer(self, name:str, verbose:bool=True) -> nn.Module:
         """Get a specific layer of model.
@@ -122,8 +168,22 @@ class Graphicalor(LogRedirectMixin):
             param_des = f"Its parameters mean is {node['parameters'][0].item()}, standard deviation is {node['parameters'][1].item()}, minimum is {node['parameters'][2].item()}, maximum is {node['parameters'][3].item()}, total number of parameters is {node['parameters'][4].item()}."
         description += param_des
         log(f"Name: {node['name']} Description: {description}.")
-        embbeding = torch.tensor(self.embedding_model.encode(description))
-        return embbeding
+        
+        # 根据是否有可用的嵌入模型，生成嵌入
+        if self.embedding_model is not None and SENTENCE_TRANSFORMER_AVAILABLE:
+            embedding = torch.tensor(self.embedding_model.encode(description))
+        else:
+            # 如果没有嵌入模型，使用简单的统计特征作为嵌入
+            # 创建一个简单的嵌入表示（使用节点索引和参数统计作为特征）
+            embedding = torch.zeros(10, dtype=torch.float32)  # 创建一个10维向量
+            embedding[0] = node['index']  # 使用节点索引
+            embedding[1:6] = node['parameters']  # 使用参数统计
+            # 使用节点类型作为额外特征
+            type_code = hash(str(node['type'])) % 1000 / 1000.0  # 将类型哈希转换为0-1之间的值
+            embedding[6] = type_code
+            log(f"使用统计特征作为嵌入，因为SentenceTransformer不可用", level="INFO")
+            
+        return embedding
     
     def extract_parameter_features(self, parameters:dict):
         """
@@ -349,32 +409,769 @@ class Graphicalor(LogRedirectMixin):
         return self.graph_B
 
 
-class TransformerGraphicalor(LogRedirectMixin, ModelInspector):
-    def __init__(self, model:nn.Module, log_path:Optional[str]=None) -> None:
-        super().__init__(model, log_path)
-        self.layer_level_graph = None
-        self.attention_level_graph = []
-    
-    def _get_statistics(self, tensor:torch.Tensor) -> torch.Tensor:
-        pass
-    def _get_layer_node_representation(self, layer:nn.Module, input_tensor:torch.Tensor) -> torch.Tensor:
+class TransformerGraphicalor(ModelInspector):
+    def __init__(self, model:nn.Module, tokenizer:Optional[Callable]=None, embedding_model:nn.Module=None, log_path:Optional[str]=None) -> None:
         """
-        Get the node representation for a transformer layer.
+        初始化TransformerGraphicalor，用于将Transformer模型表示为层次化图结构。
+        
+        Args:
+            model (nn.Module): Transformer模型
+            tokenizer (Optional[Callable], optional): 分词器. Defaults to None.
+            embedding_model (nn.Module, optional): 用于生成节点语义表示的模型. Defaults to None.
+            log_path (Optional[str], optional): 日志路径. Defaults to None.
+        """
+        super().__init__(model, tokenizer, log_path)
+        # 确保模型是LM类型
+        assert hasattr(model, '_model_type') and model._model_type == 'LM', "模型必须是Transformer语言模型类型"
+        
+        # 初始化图表示
+        self.layer_wise_graph = None  # 层级图
+        self.head_wise_graphs = []   # 每层的注意力头级图
+        
+        # 存储层和注意力头信息
+        self.layers = []  # 模型的层列表
+        self.layer_paths = []  # 层路径列表
+        self.attention_heads = {}  # 每层的注意力头字典 {layer_idx: [heads]}
+        
+        # 设置默认相似度度量方法
+        self.similarity_metric = "cosine"  # 可选: "cosine", "euclidean", "dot_product"
+        
+        # 保存embedding模型
+        self.embedding_model = embedding_model
+        
+        if log_path:
+            self.log_path = log_path
+        
+    def _get_statistics(self, tensor:torch.Tensor) -> torch.Tensor:
+        """计算张量的统计特征
 
         Args:
-            layer (nn.Module): A transformer layer.
-            input_tensor (torch.Tensor): A tensor representing the input to the layer.
+            tensor (torch.Tensor): 输入张量
 
         Returns:
-            torch.Tensor: A representation of the layer as a node in the graph.
+            torch.Tensor: 包含统计特征的张量 [mean, std, min, max, norm]
         """
-        raise NotImplementedError("Subclasses must implement this method.")
+        if tensor is None or tensor.numel() == 0:
+            return torch.zeros(5, dtype=torch.float32)
+        
+        tensor = tensor.detach().float()
+        mean = torch.mean(tensor)
+        std = torch.std(tensor)
+        min_val = torch.min(tensor)
+        max_val = torch.max(tensor)
+        norm = torch.norm(tensor)
+        skewness = torch.mean(((tensor - torch.mean(tensor)) / torch.std(tensor)) ** 3)
+        kurtosis = torch.mean(((tensor - torch.mean(tensor)) / torch.std(tensor)) ** 4)
+        sparsity = torch.sum(tensor == 0.0) / tensor.numel()
+        
+        # 确保返回一维张量
+        stats = torch.tensor([mean, std, min_val, max_val, norm, skewness, kurtosis, sparsity], dtype=torch.float32)
+        return stats
     
+    def _compute_similarity(self, tensor1:torch.Tensor, tensor2:torch.Tensor, method:str="cosine") -> float:
+        """计算两个张量之间的相似度
+
+        Args:
+            tensor1 (torch.Tensor): 第一个张量
+            tensor2 (torch.Tensor): 第二个张量
+            method (str, optional): 相似度度量方法. Defaults to "cosine".
+
+        Returns:
+            float: 相似度分数
+        """
+        # 确保输入张量至少是一维的
+        if tensor1.dim() == 0:
+            tensor1 = tensor1.unsqueeze(0)
+        if tensor2.dim() == 0:
+            tensor2 = tensor2.unsqueeze(0)
+            
+        if tensor1.shape != tensor2.shape:
+            # 如果形状不同，将它们展平后再计算相似度
+            tensor1 = tensor1.flatten()
+            tensor2 = tensor2.flatten()
+            
+        if method == "cosine":
+            return torch.nn.functional.cosine_similarity(tensor1.flatten(), tensor2.flatten(), dim=0).item()
+        elif method == "euclidean":
+            return -torch.norm(tensor1 - tensor2).item()  # 负欧几里得距离，值越大表示越相似
+        elif method == "dot_product":
+            return torch.dot(tensor1.flatten(), tensor2.flatten()).item()
+        else:
+            raise ValueError(f"不支持的相似度度量方法: {method}")
+    
+    def _extract_layers(self, verbose:bool=True) -> list:
+        """提取模型中的Transformer层，使用ModelInspector.get_layer方法
+
+        Args:
+            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+
+        Returns:
+            list: Transformer层列表
+        """
+        # 根据不同的模型架构，找出所有可能的层路径
+        layer_paths = []
+        
+        # 尝试常见的Transformer层路径
+        possible_paths = [
+            "layers",             # 直接访问层
+            "model.layers",       # 通过model属性访问层
+            "encoder.layers",     # 通过encoder访问层
+            "transformer.layers"  # 通过transformer访问层
+        ]
+        
+        for path in possible_paths:
+            try:
+                # 尝试获取指定路径下的层
+                layers_module = self.get_layer(path, verbose=False)
+                
+                # 检查是否是一个包含多个层的模块（ModuleList或类似结构）
+                if hasattr(layers_module, "__len__"):
+                    # 找到有效的层路径
+                    if verbose:
+                        log(f"在路径 '{path}' 中找到层集合，包含 {len(layers_module)} 个层")
+                    
+                    # 为每个层构建路径并添加到列表中
+                    for i in range(len(layers_module)):
+                        layer_path = f"{path}.{i}"
+                        layer_paths.append(layer_path)
+                    
+                    # 找到有效路径后跳出循环
+                    break
+            except:
+                # 如果路径不存在，继续尝试下一个可能的路径
+                continue
+        
+        # 如果没有通过预定义路径找到层，尝试直接搜索
+        if not layer_paths:
+            if verbose:
+                log("没有在预定义路径中找到层，尝试直接搜索含有注意力机制的模块", level="WARNING")
+            
+            # 暂存找到的层路径
+            found_paths = []
+            
+            # 在模型的所有模块中搜索
+            def search_attention_layers(module, path=""):
+                # 检查当前模块是否包含自注意力和前馈网络（典型的Transformer层特征）
+                has_attn = any("attn" in name.lower() for name, _ in module.named_children())
+                has_ff = any(name in ["mlp", "feed_forward"] for name, _ in module.named_children())
+                
+                if has_attn and has_ff:
+                    found_paths.append(path)
+                
+                # 递归搜索子模块
+                for name, child in module.named_children():
+                    child_path = f"{path}.{name}" if path else name
+                    search_attention_layers(child, child_path)
+            
+            # 从根模块开始搜索
+            search_attention_layers(self.model)
+            
+            # 使用找到的层路径
+            layer_paths = found_paths
+            
+            if verbose and layer_paths:
+                log(f"通过搜索找到 {len(layer_paths)} 个可能的Transformer层")
+        
+        # 存储层路径和层实例
+        self.layer_paths = layer_paths
+        self.layers = [self.get_layer(path, verbose=False) for path in layer_paths]
+        
+        if verbose:
+            log(f"最终提取到 {len(self.layers)} 个Transformer层")
+        
+        return self.layers
+    
+    def _extract_attention_heads(self, layer_path:str, layer_idx:int, verbose:bool=True) -> list:
+        """从Transformer层中提取注意力头，使用ModelInspector的方法
+
+        Args:
+            layer_path (str): 层的路径
+            layer_idx (int): 层索引
+            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+
+        Returns:
+            list: 注意力头列表或参数
+        """
+        # 对于不同的模型架构，注意力头的提取方式可能不同
+        try:
+            # 获取层实例
+            layer = self.get_layer(layer_path, verbose=False)
+            
+            # 获取自注意力模块
+            attn_path = None
+            if hasattr(layer, 'self_attn'):
+                attn_path = f"{layer_path}.self_attn"
+            else:
+                # 尝试找到注意力模块
+                for name, _ in layer.named_children():
+                    if 'attn' in name.lower() or 'attention' in name.lower():
+                        attn_path = f"{layer_path}.{name}"
+                        break
+            
+            if attn_path is None:
+                if verbose:
+                    log(f"在层 {layer_path} 中找不到注意力模块", level="WARNING")
+                return []
+            
+            # 获取注意力模块实例
+            attn = self.get_layer(attn_path, verbose=False)
+            
+            # 获取注意力头数量
+            if isinstance(attn, transformers.models.llama.modeling_llama.LlamaAttention) or isinstance(attn, transformers.models.qwen2.modeling_qwen2.Qwen2Attention):
+                config = getattr(attn, 'config')
+                n_heads = config.num_attention_heads
+            else:
+                n_heads = getattr(attn, 'num_heads', None)  # TODO: Need make it more general
+            if n_heads is None:
+                n_heads = getattr(attn, 'n_head', None)
+            if n_heads is None:
+                n_heads = getattr(attn, 'num_attention_heads', None)
+            
+            if n_heads is None:
+                if verbose:
+                    log(f"无法确定层 {layer_path} 中的注意力头数量", level="WARNING")
+                return []
+                
+            if verbose:
+                log(f"层 {layer_path} 包含 {n_heads} 个注意力头")
+            
+            # 提取注意力参数
+            heads_data = []
+            
+            # 使用ModelInspector的get_para方法获取参数
+            all_params = {}
+            for name, param in attn.named_parameters():
+                if any(x in name for x in ['q_proj', 'k_proj', 'v_proj', 'query', 'key', 'value']):
+                    all_params[name] = param
+            
+            # 尝试将参数分配到各个头
+            for name, param in all_params.items():
+                if 'weight' in name and param.dim() == 2:
+                    try:
+                        hidden_size = param.shape[0]
+                        head_dim = hidden_size // n_heads
+                        # 重塑参数以分配到各个头
+                        param_reshaped = param.view(n_heads, head_dim, -1)
+                        
+                        for head_idx in range(n_heads):
+                            if len(heads_data) <= head_idx:
+                                heads_data.append({})
+                            heads_data[head_idx][name] = param_reshaped[head_idx]
+                    except Exception as e:
+                        if verbose:
+                            log(f"无法将参数 {name} 分配到注意力头: {e}", level="WARNING")
+                            
+            # 如果是训练过的模型，尝试获取梯度
+            if self.status == 'trained':
+                # 使用ModelInspector的get_grad方法获取梯度
+                all_grads = self.get_grad(attn_path, type_='dict', verbose=False)
+                
+                for name, grad in all_grads.items():
+                    if any(x in name for x in ['q_proj', 'k_proj', 'v_proj', 'query', 'key', 'value']):
+                        if 'weight' in name and grad.dim() == 2:
+                            try:
+                                hidden_size = grad.shape[0]
+                                head_dim = hidden_size // n_heads
+                                # 重塑梯度以分配到各个头
+                                grad_reshaped = grad.view(n_heads, head_dim, -1)
+                                
+                                for head_idx in range(n_heads):
+                                    if len(heads_data) <= head_idx:
+                                        heads_data.append({})
+                                    heads_data[head_idx][f"{name}_grad"] = grad_reshaped[head_idx]
+                            except Exception as e:
+                                if verbose:
+                                    log(f"无法将梯度 {name} 分配到注意力头: {e}", level="WARNING")
+            
+            # 如果没有成功提取头信息
+            if not heads_data:
+                if verbose:
+                    log(f"无法提取层 {layer_path} 中的注意力头细节，返回完整模块", level="WARNING")
+                
+                # 创建一个简单的头表示，每个头使用相同的参数
+                param_list = self.get_para(attn_path, type_='list', verbose=False)
+                grad_dict = self.get_grad(attn_path, type_='dict', verbose=False) if self.status == 'trained' else {}
+                
+                # 为每个头创建一个包含所有参数的词典
+                for head_idx in range(n_heads):
+                    head_data = {}
+                    for i, param in enumerate(param_list):
+                        head_data[f"param_{i}"] = param
+                    
+                    for name, grad in grad_dict.items():
+                        head_data[f"{name}_grad"] = grad
+                    
+                    heads_data.append(head_data)
+                
+                if verbose:
+                    log(f"为层 {layer_path} 创建了 {n_heads} 个通用注意力头表示")
+            
+            # 存储提取的头信息
+            self.attention_heads[layer_idx] = heads_data
+            return heads_data
+            
+        except Exception as e:
+            log(f"从层 {layer_path} 提取注意力头时出错: {e}", level="ERROR")
+            return []
+    
+    def _get_embedding(self, tensor_dict) -> torch.Tensor:
+        """使用嵌入模型获取输入张量的低维表示
+        
+        Args:
+            tensor_dict (dict): 包含张量的字典
+
+        Returns:
+            torch.Tensor: 嵌入向量，如果没有嵌入模型则返回空张量
+        """
+        if self.embedding_model is None:
+            return torch.tensor([])
+        
+        # 将参数展平并组合为输入
+        flattened_tensors = []
+        for name, tensor in tensor_dict.items():
+            if isinstance(tensor, torch.Tensor) and 'grad' not in name:
+                flattened_tensors.append(tensor.flatten())
+        
+        if not flattened_tensors:
+            return torch.tensor([])
+        
+        # 合并所有张量
+        combined_tensor = torch.cat(flattened_tensors)
+        
+        # 通过嵌入模型获取低维表示
+        with torch.no_grad():
+            embedding = self.embedding_model(combined_tensor.unsqueeze(0))
+            # 假设嵌入模型是VAE，它可能会返回多个值，我们只使用潜在表示
+            if isinstance(embedding, tuple):
+                embedding = embedding[0]  # 取VAE的潜在表示
+            
+            # 确保返回一维张量
+            if embedding.dim() > 1:
+                embedding = embedding.squeeze(0)
+            
+        return embedding
+    
+    def _get_layer_representation(self, layer_path:str, layer_idx:int) -> dict:
+        """获取层的表示，使用ModelInspector的方法
+
+        Args:
+            layer_path (str): 层的路径
+            layer_idx (int): 层索引
+
+        Returns:
+            dict: 层的表示
+        """
+        # 获取层参数
+        params_list = self.get_para(layer_path, type_='list', verbose=False)
+        
+        # 计算参数统计信息
+        params_stats = {}
+        for i, param in enumerate(params_list):
+            param_name = f"param_{i}"
+            params_stats[param_name] = self._get_statistics(param)
+        
+        # 获取梯度统计信息
+        grads_stats = {}
+        if self.status == 'trained':  # 如果模型已经过校准
+            grad_dict = self.get_grad(layer_path, type_='dict', verbose=False)
+            for name, grad in grad_dict.items():
+                grads_stats[name] = self._get_statistics(grad)
+        
+        # 汇总统计信息
+        all_param_stats = torch.cat(list(params_stats.values())) if params_stats else torch.zeros(0)
+        all_grad_stats = torch.cat(list(grads_stats.values())) if grads_stats else torch.zeros(0)
+        
+        # 获取参数的嵌入表示
+        param_dict = {f"param_{i}": param for i, param in enumerate(params_list)}
+        embedding = self._get_embedding(param_dict)
+        
+        layer_info = {
+            'index': layer_idx,
+            'path': layer_path,
+            'name': f"transformer_layer_{layer_idx}",
+            'params_stats': params_stats,
+            'grads_stats': grads_stats,
+            'params_stats_combined': torch.mean(all_param_stats, dim=0) if len(all_param_stats) > 0 else torch.zeros(5),
+            'grads_stats_combined': torch.mean(all_grad_stats, dim=0) if len(all_grad_stats) > 0 else torch.zeros(5),
+            'embedding': embedding,
+        }
+        
+        return layer_info
+    
+    def _get_head_representation(self, head_data:dict, head_idx:int, layer_idx:int) -> dict:
+        """获取注意力头的表示
+
+        Args:
+            head_data (dict): 注意力头数据
+            head_idx (int): 头索引
+            layer_idx (int): 层索引
+
+        Returns:
+            dict: 注意力头的表示
+        """
+        # 分离参数和梯度
+        params_stats = {}
+        grads_stats = {}
+        params_dict = {}  # 用于嵌入
+        
+        for name, tensor in head_data.items():
+            if name.endswith('_grad'):
+                # 这是梯度
+                grads_stats[name] = self._get_statistics(tensor)
+            else:
+                # 这是参数
+                params_stats[name] = self._get_statistics(tensor)
+                params_dict[name] = tensor  # 存储原始参数用于嵌入
+        
+        # 汇总统计信息
+        all_param_stats = torch.cat(list(params_stats.values())) if params_stats else torch.zeros(0)
+        all_grad_stats = torch.cat(list(grads_stats.values())) if grads_stats else torch.zeros(0)
+        
+        # 获取参数的嵌入表示
+        embedding = self._get_embedding(params_dict)
+        
+        head_info = {
+            'layer_index': layer_idx,
+            'head_index': head_idx,
+            'name': f"layer_{layer_idx}_head_{head_idx}",
+            'params_stats': params_stats,
+            'grads_stats': grads_stats,
+            'params_stats_combined': torch.mean(all_param_stats, dim=0) if len(all_param_stats) > 0 else torch.zeros(5),
+            'grads_stats_combined': torch.mean(all_grad_stats, dim=0) if len(all_grad_stats) > 0 else torch.zeros(5),
+            'embedding': embedding,
+        }
+        
+        return head_info
+    
+    def build_layer_wise_graph(self, similarity_metric:str="cosine", verbose:bool=True) -> Data:
+        """构建层级图
+
+        Args:
+            similarity_metric (str, optional): 相似度度量方法. Defaults to "cosine".
+            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+
+        Returns:
+            Data: 层级图
+        """
+        # 设置相似度度量方法
+        self.similarity_metric = similarity_metric
+        
+        # 提取所有层
+        layers = self._extract_layers(verbose=verbose)
+        if not layers:
+            log("未找到模型层，无法构建层级图", level="ERROR")
+            return None
+        
+        # 为每层获取表示
+        layer_nodes = []
+        for idx, layer_path in enumerate(self.layer_paths):
+            layer_info = self._get_layer_representation(layer_path, idx)
+            layer_nodes.append(layer_info)
+        
+        # 构建节点特征
+        node_features = []
+        for node in layer_nodes:
+            # 确保张量至少是一维的，然后再连接
+            params_stats = node['params_stats_combined']
+            grads_stats = node['grads_stats_combined']
+            
+            # 检查并确保张量是一维的
+            if params_stats.dim() == 0:
+                params_stats = params_stats.unsqueeze(0)
+            if grads_stats.dim() == 0:
+                grads_stats = grads_stats.unsqueeze(0)
+                
+            # 结合参数和梯度统计信息
+            node_feat = torch.cat([params_stats, grads_stats])
+            
+            # 增加嵌入表示（如果可用）
+            embedding = node.get('embedding', torch.tensor([]))
+            if embedding.numel() > 0:  # 检查嵌入向量是否非空
+                node_feat = torch.cat([node_feat, embedding])
+            
+            node_features.append(node_feat)
+        
+        node_features = torch.stack(node_features)  # (n_layers, 2)
+        
+        # 构建连接边
+        # 对于Transformer模型，默认每层连接到下一层
+        edge_index = []
+        for i in range(len(layers) - 1):
+            edge_index.append([i, i+1])  # 前向连接
+        
+        # 添加跳跃连接（如果需要）
+        # 假设每层可能也有跳跃连接到之后的层
+        for i in range(len(layers)):
+            for j in range(i+2, len(layers)):
+                # 计算层间相似度，如果相似度高于阈值，添加跳跃连接
+                sim = self._compute_similarity(
+                    node_features[i], 
+                    node_features[j],
+                    method=similarity_metric
+                )
+                threshold = 0.95 if similarity_metric == "cosine" else 0.5  # 根据度量方法调整阈值
+                if sim > threshold:
+                    edge_index.append([i, j])
+                    if verbose:
+                        log(f"添加跳跃连接: 层 {i} -> 层 {j}, 相似度: {sim:.4f}")
+        
+        # 创建图数据
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t()
+        self.layer_wise_graph = Data(x=node_features, edge_index=edge_index)
+        
+        if verbose:
+            log(f"构建层级图完成，节点数: {len(layer_nodes)}，边数: {edge_index.shape[1]}")
+        
+        return self.layer_wise_graph
+    
+    def build_head_wise_graphs(self, similarity_metric:str="cosine", similarity_threshold:float=0.0, verbose:bool=True) -> list:
+        """为每层构建注意力头级图
+
+        Args:
+            similarity_metric (str, optional): 相似度度量方法. Defaults to "cosine".
+            similarity_threshold (float, optional): 相似度阈值，只有当两个头的相似度超过此值时才创建边. Defaults to 0.0.
+            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+
+        Returns:
+            list: 每层的注意力头级图
+        """
+        # 设置相似度度量方法
+        self.similarity_metric = similarity_metric
+        
+        # 确保已提取层
+        if not hasattr(self, 'layer_paths') or not self.layer_paths:
+            self._extract_layers(verbose=verbose)
+        
+        # 清空现有头级图
+        self.head_wise_graphs = []
+        
+        # 为每层构建头级图
+        for layer_idx, layer_path in enumerate(self.layer_paths):
+            # 提取注意力头
+            heads = self._extract_attention_heads(layer_path, layer_idx, verbose=verbose)
+            if not heads:
+                if verbose:
+                    log(f"层 {layer_path} 没有提取到注意力头，跳过构建头级图", level="WARNING")
+                continue
+            
+            # 为每个头获取表示
+            head_nodes = []
+            for head_idx, head_data in enumerate(heads):
+                head_info = self._get_head_representation(head_data, head_idx, layer_idx)
+                head_nodes.append(head_info)
+            
+            # 构建节点特征
+            node_features = []
+            for node in head_nodes:
+                # 确保张量至少是一维的
+                params_stats = node['params_stats_combined']
+                grads_stats = node['grads_stats_combined']
+                
+                # 检查并确保张量是一维的
+                if params_stats.dim() == 0:
+                    params_stats = params_stats.unsqueeze(0)
+                if grads_stats.dim() == 0:
+                    grads_stats = grads_stats.unsqueeze(0)
+                
+                # 结合参数和梯度统计信息
+                node_feat = torch.cat([params_stats, grads_stats])
+                
+                # 增加嵌入表示（如果可用）
+                embedding = node.get('embedding', torch.tensor([]))
+                if embedding.numel() > 0:  # 检查嵌入向量是否非空
+                    node_feat = torch.cat([node_feat, embedding])
+                
+                node_features.append(node_feat)
+            
+            if not node_features:
+                if verbose:
+                    log(f"层 {layer_path} 没有有效的注意力头特征", level="WARNING")
+                continue
+                
+            node_features = torch.stack(node_features)
+            
+            # 构建头间连接
+            edge_index = []
+            edge_attr = []
+            
+            # 计算所有头之间的相似度，只有高于阈值的才创建边
+            edge_count = 0
+            for i in range(len(head_nodes)):
+                for j in range(i+1, len(head_nodes)):
+                    sim = self._compute_similarity(
+                        node_features[i], 
+                        node_features[j],
+                        method=similarity_metric
+                    )
+                    # 只有相似度高于阈值时才添加边
+                    if sim > similarity_threshold:
+                        # 添加双向边
+                        edge_index.append([i, j])
+                        edge_index.append([j, i])
+                        edge_attr.append(sim)
+                        edge_attr.append(sim)
+                        edge_count += 2
+            
+            # 创建图数据
+            if edge_index:
+                edge_index = torch.tensor(edge_index, dtype=torch.long).t()
+                edge_attr = torch.tensor(edge_attr, dtype=torch.float32).unsqueeze(1)
+                head_graph = Data(
+                    x=node_features, 
+                    edge_index=edge_index,
+                    edge_attr=edge_attr
+                )
+                head_graph.layer_index = layer_idx
+                head_graph.layer_path = layer_path
+                
+                self.head_wise_graphs.append(head_graph)
+                
+                if verbose:
+                    log(f"层 {layer_path} 的头级图构建完成，节点数: {len(head_nodes)}，边数: {edge_index.shape[1]}")
+                    log(f"阈值: {similarity_threshold}，过滤前潜在边数: {len(head_nodes) * (len(head_nodes) - 1)}，实际创建边数: {edge_count}")
+            else:
+                if verbose:
+                    log(f"层 {layer_path} 的头级图没有满足阈值 {similarity_threshold} 的边", level="WARNING")
+        
+        return self.head_wise_graphs
+    
+    def build_hierarchical_graph(self, similarity_metric:str="cosine", similarity_threshold:float=0.0, verbose:bool=True) -> tuple:
+        """构建层次化图表示（包括层级图和所有头级图）
+
+        Args:
+            similarity_metric (str, optional): 相似度度量方法. Defaults to "cosine".
+            similarity_threshold (float, optional): 注意力头相似度阈值，只有当两个头的相似度超过此值时才创建边. Defaults to 0.0.
+            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+
+        Returns:
+            tuple: (层级图, 头级图列表)
+        """
+        # 构建层级图
+        layer_graph = self.build_layer_wise_graph(similarity_metric, verbose)
+        
+        # 构建所有层的头级图
+        head_graphs = self.build_head_wise_graphs(similarity_metric, similarity_threshold, verbose)
+        
+        return layer_graph, head_graphs
+    
+    def visualize_layer_graph(self, save_path:str="layer_graph.png"):
+        """可视化层级图
+
+        Args:
+            save_path (str, optional): 保存路径. Defaults to "layer_graph.png".
+        """
+        if self.layer_wise_graph is None:
+            log("请先调用build_layer_wise_graph构建层级图", level="ERROR")
+            return
+        
+        try:
+            import networkx as nx
+            import matplotlib.pyplot as plt
+            
+            # 转换为networkx图进行可视化
+            G = tg.utils.convert.to_networkx(self.layer_wise_graph)
+            
+            plt.figure(figsize=(10, 8))
+            pos = nx.spring_layout(G)
+            nx.draw_networkx(G, pos, with_labels=True, node_color='lightblue', 
+                             node_size=500, font_size=10, font_weight='bold')
+            
+            plt.title("Transformer Layer Graph")
+            plt.axis('off')
+            plt.savefig(os.path.join(self.log_path if hasattr(self, 'log_path') else '.', save_path))
+            plt.close()
+            
+            log(f"层级图已保存至 {os.path.join(self.log_path if hasattr(self, 'log_path') else '.', save_path)}")
+            
+        except ImportError:
+            log("请安装networkx和matplotlib以支持图可视化", level="ERROR")
+    
+    def visualize_head_graph(self, layer_idx:int=0, save_path:str=None):
+        """可视化指定层的头级图
+
+        Args:
+            layer_idx (int, optional): 层索引. Defaults to 0.
+            save_path (str, optional): 保存路径. Defaults to None.
+        """
+        if not self.head_wise_graphs:
+            log("请先调用build_head_wise_graphs构建头级图", level="ERROR")
+            return
+        
+        # 查找对应层的头级图
+        target_graph = None
+        for graph in self.head_wise_graphs:
+            if graph.layer_index == layer_idx:
+                target_graph = graph
+                break
+        
+        if target_graph is None:
+            log(f"未找到层 {layer_idx} 的头级图", level="ERROR")
+            return
+        
+        try:
+            import networkx as nx
+            import matplotlib.pyplot as plt
+            
+            # 转换为networkx图进行可视化
+            G = tg.utils.convert.to_networkx(target_graph)
+            
+            # 设置边权重（相似度）作为标签
+            edge_labels = {}
+            for i, (u, v) in enumerate(target_graph.edge_index.t().tolist()):
+                edge_labels[(u, v)] = f"{target_graph.edge_attr[i].item():.2f}"
+            
+            plt.figure(figsize=(10, 8))
+            pos = nx.circular_layout(G)
+            nx.draw_networkx(G, pos, with_labels=True, node_color='lightgreen', 
+                             node_size=500, font_size=10, font_weight='bold')
+            nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
+            
+            plt.title(f"Attention Heads Graph for Layer {layer_idx}")
+            plt.axis('off')
+            
+            if save_path is None:
+                save_path = f"head_graph_layer_{layer_idx}.png"
+            
+            plt.savefig(os.path.join(self.log_path if hasattr(self, 'log_path') else '.', save_path))
+            plt.close()
+            
+            log(f"层 {layer_idx} 的头级图已保存至 {os.path.join(self.log_path if hasattr(self, 'log_path') else '.', save_path)}")
+            
+        except ImportError:
+            log("请安装networkx和matplotlib以支持图可视化", level="ERROR")
 
 
 if __name__ == '__main__':
+    # from models import get_model
+    # resnet50 = get_model('resnet50').cuda()
+    # g = Graphicalor(resnet50)
+    # graph = g.grapha()
+    # print(graph)
+    # 加载语言模型
+    print("="*50)
+    print("Loading Language Model")
+    print("="*50)
     from models import get_model
-    resnet50 = get_model('resnet50').cuda()
-    g = Graphicalor(resnet50)
-    graph = g.grapha()
-    print(graph)
+    from config.config import CONF
+    llama_model, tokenizer = get_model('Qwen2.5-3B', cache_dir=CONF.cache_dir, add_padding_token=True)
+
+    # 创建TransformerGraphicalor实例
+    transformer_graph = TransformerGraphicalor(llama_model, tokenizer)
+
+    # 可选：校准模型以获取梯度
+    from data import get_dataset
+    dataset = get_dataset('imdb')
+    transformer_graph.calibrate(dataset, task_type='sequence_classification')
+
+    # 构建层次化图表示
+    print("\n开始构建层次化图表示...")
+    layer_graph, head_graphs = transformer_graph.build_hierarchical_graph(
+        similarity_metric="cosine",
+        similarity_threshold=0.9,  # 设置相似度阈值为0.9
+        verbose=True
+    )
+
+    # 可视化
+    transformer_graph.visualize_layer_graph("llama_layer_graph.png")
+    for i in range(min(3, len(transformer_graph.layer_paths))):  # 可视化前三层
+        transformer_graph.visualize_head_graph(layer_idx=i)

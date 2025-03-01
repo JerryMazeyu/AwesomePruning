@@ -2,7 +2,7 @@ import torchvision.models as models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import warnings
 warnings.filterwarnings("ignore")
-
+from config.config import CONF
 
 CNN_MODELS_MAP = {
         'alexnet': models.alexnet,
@@ -23,9 +23,10 @@ CNN_MODELS_MAP = {
 
 
 LM_MODELS_MAP = {
-        'Llama-2-7b-hf': 'meta-llama/Llama-2-7b-hf',
-        'Llama-3.1-8b': 'meta-llama/Llama-3.1-8B',
+        'Llama-2-7B-hf': 'meta-llama/Llama-2-7b-hf',
+        'Llama-3.1-8B': 'meta-llama/Llama-3.1-8B',
         'DeepSeek-R1-Distill-Llama-8B': 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B',
+        'Qwen2.5-3B': 'Qwen/Qwen2.5-3B-Instruct'
 }
 
 MODELS_MAP = {**CNN_MODELS_MAP, **LM_MODELS_MAP}
@@ -52,6 +53,7 @@ def get_model(model_name:str, pretrained:bool=True, num_classes:int=1000, *args,
         model_name (str): Model name
         pretrained (bool, optional): If pretrained. Defaults to True.
         num_classes (int, optional): Number of classes. Defaults to 1000.
+        add_padding_token (bool, optional): Add padding token. Defaults to False.
     """
     if model_name not in MODELS_MAP.keys() and not model_name.startswith('/'):
         raise ValueError(f"Make sure your name is in {list(MODELS_MAP.keys())} or a path to a model.")
@@ -60,9 +62,17 @@ def get_model(model_name:str, pretrained:bool=True, num_classes:int=1000, *args,
             model_name = LM_MODELS_MAP[model_name]
         except:
             pass
-        model = AutoModelForCausalLM.from_pretrained(model_name, *args, **kwargs)
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if kwargs.get('add_padding_token', None) is True:
+            add_padding_token = True
+            kwargs.pop('add_padding_token')
+        else:
+            add_padding_token = False
+        model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=CONF.auth_token, *args, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=CONF.auth_token, *args, **kwargs)
+        if add_padding_token:
+            tokenizer.pad_token = tokenizer.eos_token
         setattr(model, '_model_type', 'LM')
+        model = model.to(CONF.device)
         return model, tokenizer
     elif model_name in CNN_MODELS_MAP.keys():
         model_fn = CNN_MODELS_MAP[model_name]  # Get model function
@@ -78,8 +88,7 @@ def get_model(model_name:str, pretrained:bool=True, num_classes:int=1000, *args,
                 model.classifier = nn.Linear(model.classifier.in_features, num_classes)
             elif model_name.startswith('vgg') or model_name == 'alexnet':
                 model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
-            
-        
+        model = model.to(CONF.device)
         setattr(model, '_model_type', 'CNN')
         return model
 
@@ -90,4 +99,4 @@ if __name__ == "__main__":
     os.environ['CURL_CA_BUNDLE'] = ''
     os.environ['REQUESTS_CA_BUNDLE'] = ''
     res = 'Llama-2-7b-hf'
-    m = get_model(model_name=res, cache_dir='/mnt/share_data')
+    m = get_model(model_name=res, cache_dir=CONF.cache_dir)

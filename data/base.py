@@ -17,9 +17,28 @@ class BaseDataSet(Dataset):
         # 如果是HuggingFace数据集，返回处理后的数据
         if hasattr(self.dt, 'features'):
             if self.meta_.get('task_type') == 'language_modeling':
-                return {'input_ids': item['text'] if 'text' in item else item['input_ids']}
+                # 对于语言建模任务，确保返回的是字典格式的input_ids
+                if isinstance(item, dict):
+                    # 已经是字典格式，检查是否有'input_ids'键
+                    if 'input_ids' in item:
+                        return {'input_ids': item['input_ids']}
+                    elif 'text' in item:
+                        return {'input_ids': item['text']}
+                    else:
+                        # 如果没有期望的键，返回整个字典
+                        return item
+                else:
+                    # 不是字典格式，尝试包装成字典
+                    return {'input_ids': item}
             elif self.meta_.get('task_type') == 'sequence_classification':
-                return {'input_ids': item['text'], 'labels': item['label']}
+                if isinstance(item, dict):
+                    if 'text' in item and 'label' in item:
+                        return {'input_ids': item['text'], 'labels': item['label']}
+                    else:
+                        return item
+                else:
+                    # 处理非字典格式的分类数据
+                    return item
             else:
                 return item
         # 如果是torchvision数据集，直接返回

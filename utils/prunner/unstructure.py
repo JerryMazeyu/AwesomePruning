@@ -6,7 +6,7 @@ import seaborn as sns
 from torch import nn
 from typing import Union, Optional, Callable
 from utils.inspector import ModelInspector
-from utils.io import soft_mkdir, log, generate_name
+from utils.io import log
 
 class WeightsCutter(ModelInspector):
     def __init__(self, model, tokenizer:Optional[Callable]=None, log_path:str=None):
@@ -485,8 +485,11 @@ class WeightsCutter(ModelInspector):
         plt.title("Heatmap with Masked Regions")
         plt.xlabel("X axis")
         plt.ylabel("Y axis")
-        plt.savefig(os.path.join(log_path, "heatmap_with_masked_regions.png"))
+        plt.savefig(os.path.join(self.log_path, "heatmap_with_masked_regions.png"))
         plt.close()
+
+
+__all__ = ['WeightsCutter']
 
 if __name__ == '__main__':
     import argparse

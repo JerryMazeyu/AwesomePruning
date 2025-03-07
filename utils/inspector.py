@@ -15,6 +15,8 @@ import torch.nn as nn
 import numpy as np
 from collections import OrderedDict
 from typing import Callable
+import math
+
 def format_params(n):
     """
     Convert parameter count n to a more readable format, e.g.:
@@ -214,7 +216,7 @@ class ModelInspector(LogRedirectMixin):
             params = sum(p.numel() for p in module.parameters())
             print(f"  {name}: {module.__class__.__name__} - {format_params(params)} parameters")
 
-    def calibrate(self, calibration_dataset: torch.utils.data.Dataset, batch_size: int = 2, task_type: str = None, loss_fns=None, loss_weights=None):
+    def calibrate(self, calibration_dataset: torch.utils.data.Dataset, batch_size: int = 2, n_batches: int = 10, task_type: str = None):
         """Perform one forward and backward pass on calibration dataset to obtain model gradients.
 
         Args:
@@ -222,8 +224,6 @@ class ModelInspector(LogRedirectMixin):
             batch_size (int, optional): Batch size. Defaults to 32.
             task_type (str, optional): Task type. If None, will be inferred from model type. 
                 Available values: 'classification', 'language_modeling', 'sequence_classification', etc.
-            loss_fns (list, optional): List of loss functions.
-            loss_weights (list, optional): List of loss weights.
         """
         if task_type is None:
             task_type = self._infer_task_type()
@@ -235,83 +235,211 @@ class ModelInspector(LogRedirectMixin):
         )
         
         self.model.train()  # Ensure model is in training mode
-        
+        self.model.zero_grad()
+
         # Get one batch of data
         batch = next(iter(dataloader))
         
         # Process data and compute loss based on task type
-        if task_type == 'classification':
-            inputs, labels = batch
-            inputs = inputs.to(CONF.device)
-            labels = labels.to(CONF.device)
-            outputs = self.model(inputs)
-            loss = nn.CrossEntropyLoss()(outputs, labels)
+        if task_type == 'classification':  # TODO: NOT TESTED
+            raise NotImplementedError("Classification task is not implemented yet.")
+            # inputs, labels = batch
+            # inputs = inputs.to(CONF.device)
+            # labels = labels.to(CONF.device)
+            # outputs = self.model(inputs)
+            # loss = nn.CrossEntropyLoss()(outputs, labels)
         
-        elif task_type == 'sequence_classification':
-            inputs, labels = batch['input_ids'], batch['labels']
-            if isinstance(inputs, torch.Tensor):
-                inputs = inputs.to(CONF.device)
-            elif isinstance(inputs, list) and isinstance(inputs[0], str):
-                inputs = self.tokenizer(inputs, return_tensors='pt', padding=True, truncation=True)
-                inputs = inputs.to(CONF.device)
-            else:
-                raise ValueError(f"Unsupported input format: {type(inputs)}")
-            if isinstance(labels, torch.Tensor):
-                labels = labels.to(CONF.device)
-            outputs = self.model(**inputs)
-            last_logits = outputs.logits[:, -1, :]
-            loss = nn.CrossEntropyLoss()(last_logits, labels)
+        elif task_type == 'sequence_classification':  # TODO: N_BATCHES
+            raise NotImplementedError("Sequence classification task is not implemented yet.")
+            # inputs, labels = batch['input_ids'], batch['labels']
+            # if isinstance(inputs, torch.Tensor):
+            #     inputs = inputs.to(CONF.device)
+            # elif isinstance(inputs, list) and isinstance(inputs[0], str):
+            #     inputs = self.tokenizer(inputs, return_tensors='pt', padding=True, truncation=True)
+            #     inputs = inputs.to(CONF.device)
+            # else:
+            #     raise ValueError(f"Unsupported input format: {type(inputs)}")
+            # if isinstance(labels, torch.Tensor):
+            #     labels = labels.to(CONF.device)
+            # outputs = self.model(**inputs)
+            # last_logits = outputs.logits[:, -1, :]
+            # loss = nn.CrossEntropyLoss()(last_logits, labels)
         
-        elif task_type == 'language_modeling':  # TODO: NOT TESTED
-            # For language models (e.g., LLaMA)
-            inputs = batch
-            if isinstance(inputs, dict):
-                inputs = {k: v.to(CONF.device) for k, v in inputs.items()}
-                outputs = self.model(**inputs)
-            elif isinstance(inputs, list):
-                # Process list type input
+        elif task_type == 'language_modeling':
+            # 语言建模任务评估
+            total_loss = 0.0
+            total_tokens = 0
+            
+            for i, batch in enumerate(dataloader):
+                if i >= n_batches:
+                    break
+                    
                 try:
-                    # Try to convert list directly to tensor
-                    inputs_tensor = torch.tensor(inputs).to(CONF.device)
-                    outputs = self.model(inputs_tensor)
-                except Exception as e:
-                    log(f"Cannot process inputs: {e}", level="ERROR")
-                    # Try to get the first element (if it's a dictionary)
-                    if len(inputs) > 0 and isinstance(inputs[0], dict):
-                        first_item = inputs[0]
-                        input_ids = first_item.get('input_ids', first_item.get('text', None))
-                        if input_ids is not None:
-                            input_ids = torch.tensor([input_ids]).to(CONF.device)
-                            outputs = self.model(input_ids)
+                    # 处理不同格式的输入
+                    if isinstance(batch, dict):
+                        # 检查input_ids是否为字符串列表
+                        if 'input_ids' in batch and isinstance(batch['input_ids'], list) and isinstance(batch['input_ids'][0], str):
+                            # 需要先使用tokenizer处理文本
+                            if self.tokenizer is None:
+                                log(f"输入是文本但未提供tokenizer")
+                                continue
+                                
+                            # 将文本转换为token ids
+                            encoded = self.tokenizer(
+                                batch['input_ids'],  # 这里是文本列表
+                                return_tensors='pt',
+                                padding=True,
+                                truncation=True,
+                                max_length=512  # 可根据需要调整
+                            )
+                            batch_on_device = {k: v.to(CONF.device) for k, v in encoded.items()}
                         else:
-                            raise ValueError(f"Cannot extract valid data from list input: {inputs[0]}")
-                    else:
-                        raise ValueError(f"Unsupported list input format: {inputs}")
-            else:
-                inputs = inputs.to(CONF.device)
-                outputs = self.model(inputs)
-            # Compute loss for language model
-            if hasattr(outputs, 'loss'):
-                loss = outputs.loss
-            else:
-                # Manually compute loss if not provided in outputs
-                shift_logits = outputs.logits[..., :-1, :].contiguous()
-                shift_labels = inputs['input_ids'][..., 1:].contiguous()
-                loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), 
-                                            shift_labels.view(-1))
-        
-        # Backward pass
-        loss.backward()
-        
-        # Update status
-        self.status = 'trained'
+                            # 已经是tokenized的张量数据，只需移至正确设备
+                            batch_on_device = {k: v.to(CONF.device) if isinstance(v, torch.Tensor) else v 
+                                              for k, v in batch.items()}
+                        
+                        # 对于没有labels的数据集（常见情况），创建移位labels用于计算下一个token的预测
+                        if 'input_ids' in batch_on_device:
+                            # 将input_ids右移一位作为标签
+                            input_ids = batch_on_device['input_ids']
+                            
+                            # 如果有attention_mask，使用它来计算有效token数
+                            if 'attention_mask' in batch_on_device:
+                                attention_mask = batch_on_device['attention_mask']
+                                # 有效token计数（忽略padding）
+                                batch_tokens = attention_mask.sum().item()
+                            else:
+                                # 如果没有mask，假设所有token都有效
+                                batch_tokens = input_ids.numel()
+                                
+                            # 前向传播
+                            outputs = self.model(**batch_on_device)
+                            
+                            # 如果模型已经计算了loss
+                            if hasattr(outputs, 'loss') and outputs.loss is not None:
+                                batch_loss = outputs.loss * batch_tokens  # 转换为总损失
+                            else:
+                                # 否则手动计算loss
+                                # 输入序列移位：预测目标是下一个token
+                                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                                shift_labels = input_ids[..., 1:].contiguous()
+                                
+                                # 使用交叉熵损失
+                                loss_fct = nn.CrossEntropyLoss(reduction='sum')  # 使用sum便于计算总token的损失
+                                batch_loss = loss_fct(
+                                    shift_logits.view(-1, shift_logits.size(-1)),
+                                    shift_labels.view(-1)
+                                )
+                                
+                                # 计算有效token数量（排除padding）
+                                if 'attention_mask' in batch_on_device:
+                                    # 右移attention_mask来匹配shift_labels
+                                    shift_mask = attention_mask[..., 1:].contiguous()
+                                    batch_tokens = shift_mask.sum().item()
+                                else:
+                                    batch_tokens = shift_labels.numel()
 
-        if loss_fns is None:
-            pass
-        else:
-            total_loss = 0
-            for fn, weight in zip(loss_fns, loss_weights):
-                total_loss += weight * fn(outputs, labels)
+                            # 反向传播
+                            batch_loss.backward()
+
+                            # 累加总损失和token数
+                            total_loss += batch_loss.item()
+                            total_tokens += batch_tokens
+                            
+                    elif isinstance(batch, list) and all(isinstance(item, str) for item in batch):
+                        # 直接是字符串列表的情况
+                        if self.tokenizer is None:
+                            log(f"输入是文本但未提供tokenizer")
+                            continue
+                            
+                        # 使用tokenizer处理文本
+                        encoded = self.tokenizer(
+                            batch,  # 文本列表
+                            return_tensors='pt',
+                            padding=True,
+                            truncation=True,
+                            max_length=512  # 可根据需要调整
+                        )
+                        batch_on_device = {k: v.to(CONF.device) for k, v in encoded.items()}
+                        
+                        # 获取input_ids用于后续处理
+                        input_ids = batch_on_device['input_ids']
+                        
+                        # 如果有attention_mask，使用它来计算有效token数
+                        if 'attention_mask' in batch_on_device:
+                            attention_mask = batch_on_device['attention_mask']
+                            batch_tokens = attention_mask.sum().item()
+                        else:
+                            batch_tokens = input_ids.numel()
+                        
+                        # 前向传播
+                        outputs = self.model(**batch_on_device)
+                        
+                        # 处理损失计算与之前相同
+                        if hasattr(outputs, 'loss') and outputs.loss is not None:
+                            batch_loss = outputs.loss * batch_tokens  # 转换为总损失
+                        else:
+                            shift_logits = outputs.logits[..., :-1, :].contiguous()
+                            shift_labels = input_ids[..., 1:].contiguous()
+                            
+                            loss_fct = nn.CrossEntropyLoss(reduction='sum')
+                            batch_loss = loss_fct(
+                                shift_logits.view(-1, shift_logits.size(-1)),
+                                shift_labels.view(-1)
+                            )
+                            
+                            if 'attention_mask' in batch_on_device:
+                                shift_mask = attention_mask[..., 1:].contiguous()
+                                batch_tokens = shift_mask.sum().item()
+                            else:
+                                batch_tokens = shift_labels.numel()
+
+                        # 反向传播
+                        batch_loss.backward()
+
+                        # 累加总损失和token数
+                        total_loss += batch_loss.item()
+                        total_tokens += batch_tokens
+
+                    else:
+                        log(f"不支持的输入格式: {type(batch)}")
+                        continue
+                        
+                except Exception as e:
+                    log(f"批次处理错误: {str(e)}")
+                    import traceback
+                    log(traceback.format_exc())
+                
+            # 计算平均损失和困惑度
+            if total_tokens > 0:
+                avg_loss = total_loss / total_tokens
+                perplexity = math.exp(avg_loss)
+                
+                # 将困惑度归一化到0-1之间作为分数
+                # 使用一个合理的阈值(比如20)作为高困惑度
+                max_reasonable_ppl = 20.0
+                score = max(0.0, 1.0 - min(perplexity / max_reasonable_ppl, 1.0))
+                
+                log(f"语言建模评估 - 总tokens: {total_tokens}")
+                log(f"语言建模评估 - 平均损失: {avg_loss:.4f}")
+                log(f"语言建模评估 - 困惑度(PPL): {perplexity:.4f}")
+                log(f"语言建模评估 - 归一化分数: {score:.4f}")
+                
+                results = {
+                    'loss': avg_loss,
+                    'perplexity': perplexity,
+                    'score': score,
+                    'total_tokens': total_tokens
+                }
+                # Update status
+                self.status = 'trained'
+                
+            else:
+                log(f"没有处理任何有效tokens")
+                results = {'loss': float('inf'), 'perplexity': float('inf'), 'score': 0.0, 'total_tokens': 0}
+        
+        # 返回score作为主要结果，同时提供完整结果字典供详细分析
+        return results
 
     def _infer_task_type(self, dataset:torch.utils.data.Dataset=None):
         """Infer task type based on model characteristics"""
@@ -419,7 +547,7 @@ class ModelInspector(LogRedirectMixin):
         if type_ == 'dict':
             return gradients
         else:
-            return [x[1] for x in gradients.item()]
+            return [x[1] for x in gradients.items()]
     
     def plot_histogram(self, tensors:list[torch.Tensor], bin:int=30, save_path='tensor_hist.png'):
         """
@@ -494,30 +622,34 @@ if __name__ == "__main__":
     print("TESTING LLM MODEL WITH HUGGINGFACE DATASET")
     print("="*50)
     
-    # Get IMDB dataset
-    imdb = get_dataset('imdb')
-    print(f"IMDB dataset loaded, size: {len(imdb)}")
+    # Get dataset
+    # imdb = get_dataset('imdb')
+    # print(f"IMDB dataset loaded, size: {len(imdb)}")
+    wikitext2 = get_dataset('wikitext2')
+    print(f"Wikitext2 dataset loaded, size: {len(wikitext2)}")
     
     # Get Llama model (or use a smaller model like GPT-2)
-    llama2, tokenizer = get_model('Llama-2-7b-hf', cache_dir=CONF.cache_dir)
+    llama2, tokenizer = get_model('Qwen2.5-3B', cache_dir=CONF.cache_dir)
     
-    # Try to move model to GPU
-    try:
-        llama2.to(CONF.device)
-        print(f"LLM model loaded on {CONF.device}")
-    except RuntimeError as e:
-        print(f"Model too large for {CONF.device}, keeping on CPU: {e}")
+    # # Try to move model to GPU
+    # try:
+    #     llama2.to(CONF.device)
+    #     print(f"LLM model loaded on {CONF.device}")
+    # except RuntimeError as e:
+    #     print(f"Model too large for {CONF.device}, keeping on CPU: {e}")
     
     # Use ModelInspector to check model
     nlp_inspector = ModelInspector(llama2, tokenizer)
     nlp_inspector.summary()
+
+    nlp_inspector.calibrate(wikitext2)
     
-    # Check specific layer
-    nlp_layer = 'model.layers.0.self_attn'
-    layer = nlp_inspector.get_layer(nlp_layer)
-    params = nlp_inspector.get_para(nlp_layer)
+    # # Check specific layer
+    # nlp_layer = 'model.layers.0.self_attn'
+    # layer = nlp_inspector.get_layer(nlp_layer)
+    # params = nlp_inspector.get_para(nlp_layer)
     
     # Only take the first two parameters to plot histogram, avoid memory issues
-    nlp_inspector.plot_histogram(params[:2], save_path='llama_params.png')
+    # nlp_inspector.plot_histogram(params[:2], save_path='llama_params.png')
     
     print("\nTesting completed!")

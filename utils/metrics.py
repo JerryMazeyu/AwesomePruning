@@ -77,163 +77,97 @@ def evaluate_model_performance(
     total_loss = 0.0
     correct = 0
     total = 0
+
+    if task_type == 'classification':
+        raise NotImplementedError("Classification task is not implemented yet.")
+ 
+    elif task_type == 'sequence_classification':
+        raise NotImplementedError("Sequence classification task is not implemented yet.")
     
-    with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            if i >= n_batches:
-                break
-            
-            try:
-                # 根据任务类型处理数据
-                if task_type == 'classification':
-                    # 图像分类
-                    inputs, labels = batch
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
-                    
-                    # 前向传播
-                    outputs = model(inputs)
-                    loss = F.cross_entropy(outputs, labels)
-                    
-                    # 计算准确率
-                    _, predicted = torch.max(outputs, 1)
-                    correct += (predicted == labels).sum().item()
-                    total += labels.size(0)
-                
-                elif task_type in ['sequence_classification', 'sentiment_analysis']:
-                    # 文本分类
+    elif task_type == 'language_modeling':
+        print("Language modeling task is running...")
+        total_loss = 0.0
+        total_tokens = 0
+    
+        with torch.no_grad():
+            for i, batch in enumerate(dataloader):
+                if i >= n_batches:
+                    break
+
+                try:
+                    # 根据任务类型处理数据
                     if isinstance(batch, dict):
-                        batch = {k: v.to(device) for k, v in batch.items()}
-                        labels = batch.get('labels', None)
-                        
-                        # 前向传播
-                        outputs = model(**batch)
-                        
-                        # 计算损失和准确率
-                        if labels is not None:
-                            loss = outputs.loss
-                            logits = outputs.logits
-                            _, predicted = torch.max(logits, 1)
-                            correct += (predicted == labels).sum().item()
-                            total += labels.size(0)
-                        else:
-                            loss = torch.tensor(0.0).to(device)
-                    else:
-                        # 处理非字典格式的数据
-                        inputs, labels = batch
-                        if isinstance(inputs, list) and isinstance(inputs[0], str):
-                            # 文本输入需要编码
-                            encoded = tokenizer(inputs, return_tensors='pt', padding=True, truncation=True)
-                            encoded = {k: v.to(device) for k, v in encoded.items()}
-                            labels = labels.to(device)
-                            
-                            # 前向传播
-                            outputs = model(**encoded)
-                        else:
-                            # 已编码的输入
-                            inputs = inputs.to(device)
-                            labels = labels.to(device)
-                            outputs = model(inputs)
-                        
-                        # 计算损失和准确率
-                        loss = F.cross_entropy(outputs, labels)
-                        _, predicted = torch.max(outputs, 1)
-                        correct += (predicted == labels).sum().item()
-                        total += labels.size(0)
-                
-                elif task_type == 'language_modeling':
-                    # 语言建模
-                    if isinstance(batch, dict):
-                        # HuggingFace格式
-                        batch = {k: v.to(device) for k, v in batch.items()}
-                        
-                        # 前向传播
-                        outputs = model(**batch)
-                        
-                        # 获取损失
-                        if hasattr(outputs, 'loss'):
-                            loss = outputs.loss
-                        else:
-                            # 手动计算损失
-                            shift_logits = outputs.logits[..., :-1, :].contiguous()
-                            shift_labels = batch['input_ids'][..., 1:].contiguous()
-                            loss = F.cross_entropy(
-                                shift_logits.view(-1, shift_logits.size(-1)),
-                                shift_labels.view(-1)
-                            )
-                    elif isinstance(batch, (list, tuple)) and len(batch) == 2:
-                        # (inputs, targets)格式
-                        inputs, targets = batch
-                        inputs = inputs.to(device)
-                        targets = targets.to(device)
-                        
-                        # 前向传播
-                        outputs = model(inputs)
-                        
-                        # 计算损失
-                        loss = F.cross_entropy(
-                            outputs.view(-1, outputs.size(-1)),
-                            targets.view(-1)
-                        )
-                    else:
-                        # 处理其他格式
-                        inputs = batch
-                        if isinstance(inputs, list):
-                            # 尝试将文本编码
-                            if tokenizer is not None and isinstance(inputs[0], str):
-                                encoded = tokenizer(inputs, return_tensors='pt', padding=True, truncation=True)
-                                encoded = {k: v.to(device) for k, v in encoded.items()}
-                                outputs = model(**encoded)
-                            else:
-                                # 无法处理的格式
-                                logger.warning(f"无法处理的数据格式: {type(batch)}")
+                        if 'input_ids' in batch and isinstance(batch['input_ids'], list) and isinstance(batch['input_ids'][0], str):
+                            # 需要先使用tokenizer处理文本
+                            if tokenizer is None:
+                                print(f"输入是文本但未提供tokenizer")
                                 continue
+
+                            # 将文本转换为token ids
+                            encoded = tokenizer(
+                                batch['input_ids'],  # 这里是文本列表
+                                return_tensors='pt',
+                                padding=True,
+                                truncation=True,
+                                max_length=512  # 可根据需要调整
+                            )
+                            batch_on_device = {k: v.to(device) for k, v in encoded.items()}
                         else:
-                            # 假设已编码的输入
-                            inputs = inputs.to(device)
-                            outputs = model(inputs)
-                        
-                        # 假设模型输出包含loss
-                        loss = getattr(outputs, 'loss', torch.tensor(0.0).to(device))
-                
-                else:
-                    logger.warning(f"不支持的任务类型: {task_type}")
-                    return 0.0
-                
-                # 累加损失
-                total_loss += loss.item()
-                
-            except Exception as e:
-                logger.error(f"评估过程中出错: {e}")
-                continue
-    
-    # 计算评估指标
-    avg_loss = total_loss / n_batches if n_batches > 0 else float('inf')
-    
-    # 根据任务类型计算得分
-    if task_type in ['classification', 'sequence_classification', 'sentiment_analysis']:
-        # 分类任务：使用准确率作为得分
-        score = correct / total if total > 0 else 0.0
-    elif task_type == 'language_modeling':
-        # 语言建模：使用困惑度的倒数作为得分
-        # 困惑度 = exp(平均损失)
-        # 我们取其倒数并归一化到[0,1]
-        perplexity = np.exp(avg_loss)
-        score = max(0.0, min(1.0, 1.0 / perplexity))
-    else:
-        # 默认使用损失的归一化倒数
-        score = max(0.0, min(1.0, 1.0 / (1.0 + avg_loss)))
-    
-    # 恢复模型状态
-    model.train(training)
-    
-    # 记录评估结果
-    logger.info(f"评估完成: 任务={task_type}, 样本数={n_samples}, 时间={time.time()-start_time:.2f}秒")
-    if task_type in ['classification', 'sequence_classification', 'sentiment_analysis']:
-        logger.info(f"准确率: {score:.4f}")
-    elif task_type == 'language_modeling':
-        logger.info(f"困惑度: {perplexity:.4f}, 得分: {score:.4f}")
-    else:
-        logger.info(f"损失: {avg_loss:.4f}, 得分: {score:.4f}")
-    
-    return score 
+                            # 已经是tokenized的张量数据，只需移至正确设备
+                            batch_on_device = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                                              for k, v in batch.items()}
+                        # 对于没有labels的数据集（常见情况），创建移位labels用于计算下一个token的预测
+                        if 'input_ids' in batch_on_device:
+                            # 将input_ids右移一位作为标签
+                            input_ids = batch_on_device['input_ids']
+                            
+                            # 如果有attention_mask，使用它来计算有效token数
+                            if 'attention_mask' in batch_on_device:
+                                attention_mask = batch_on_device['attention_mask']
+                                # 有效token计数（忽略padding）
+                                batch_tokens = attention_mask.sum().item()
+                            else:
+                                # 如果没有mask，假设所有token都有效
+                                batch_tokens = input_ids.numel()
+                            
+                            outputs = model(**batch_on_device)
+                            # 如果模型已经计算了loss
+                            if hasattr(outputs, 'loss') and outputs.loss is not None:
+                                batch_loss = outputs.loss * batch_tokens  # 转换为总损失
+                            else:
+                                # 否则手动计算loss
+                                # 输入序列移位：预测目标是下一个token
+                                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                                shift_labels = input_ids[..., 1:].contiguous()
+                                
+                                # 使用交叉熵损失
+                                loss_fct = nn.CrossEntropyLoss(reduction='sum')  # 使用sum便于计算总token的损失
+                                batch_loss = loss_fct(
+                                    shift_logits.view(-1, shift_logits.size(-1)),
+                                    shift_labels.view(-1)
+                                )
+
+                                # 计算有效token数量（排除padding）
+                                if 'attention_mask' in batch_on_device:
+                                    # 右移attention_mask来匹配shift_labels
+                                    shift_mask = attention_mask[..., 1:].contiguous()
+                                    batch_tokens = shift_mask.sum().item()
+                                else:
+                                    batch_tokens = shift_labels.numel()
+                            
+                            # 累加总损失和token数
+                            total_loss += batch_loss.item()
+                            total_tokens += batch_tokens
+                    else:
+                        raise ValueError(f"Unsupported input format: {type(batch)}")
+                except Exception as e:
+                    print(f"Error in language modeling task: {e}")
+                    continue
+            
+            avg_loss = total_loss / n_batches if n_batches > 0 else float('inf')
+            perplexity = np.exp(total_loss / total_tokens)
+            score = max(0.0, min(1.0, 1.0 / perplexity))
+            print(f"Perplexity: {perplexity:.4f}, Score: {score:.4f}")
+        
+        model.train(training)
+        return {'loss': avg_loss, 'perplexity': perplexity, 'score': score}

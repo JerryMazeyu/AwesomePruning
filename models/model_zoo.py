@@ -92,6 +92,7 @@ def get_model(model_name:str, pretrained:bool=True, num_classes:int=1000, *args,
         setattr(model, '_model_type', 'CNN')
         return model
 
+__all__ = ['model_list', 'get_model']
 
 if __name__ == "__main__":
     # print(model_list())

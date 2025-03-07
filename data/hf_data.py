@@ -9,15 +9,15 @@ warnings.filterwarnings("ignore")
 DATASET_MAP = {
     # Text classification datasets
     'imdb': 'imdb',
-    'sst2': 'glue/sst2',
-    'mnli': 'glue/mnli',
+    # 'sst2': 'glue/sst2',
+    # 'mnli': 'glue/mnli',
     # Language modeling datasets
-    'wikitext2': 'wikitext/wikitext-2-raw-v1',
-    'wikitext103': 'wikitext/wikitext-103-raw-v1',
-    'c4': 'c4',
+    'wikitext2': 'Salesforce/wikitext',
+    # 'wikitext103': 'wikitext/wikitext-103-raw-v1',
+    # 'c4': 'c4',
     # Question answering datasets
-    'squad': 'squad',
-    'squad_v2': 'squad_v2'
+    # 'squad': 'squad',
+    # 'squad_v2': 'squad_v2'
 }
 
 # Dataset parameter mappings
@@ -25,7 +25,7 @@ ARG_MAP = {
     'imdb': {'split': 'train'},
     'sst2': {'split': 'train'},
     'mnli': {'split': 'train'},
-    'wikitext2': {'split': 'train'},
+    'wikitext2': {'name': 'wikitext-2-raw-v1', 'split': 'train'},
     'wikitext103': {'split': 'train'},
     'c4': {'split': 'train'},
     'squad': {'split': 'train'},

@@ -469,140 +469,140 @@ class TransformerGraphicalor(ModelInspector):
         return stats
     
     def _compute_similarity(self, tensor1:torch.Tensor, tensor2:torch.Tensor, method:str="cosine") -> float:
-        """计算两个张量之间的相似度
+        """Compute the similarity between two tensors.
 
         Args:
-            tensor1 (torch.Tensor): 第一个张量
-            tensor2 (torch.Tensor): 第二个张量
-            method (str, optional): 相似度度量方法. Defaults to "cosine".
+            tensor1 (torch.Tensor): The first tensor.
+            tensor2 (torch.Tensor): The second tensor.
+            method (str, optional): The similarity metric. Defaults to "cosine".
 
         Returns:
-            float: 相似度分数
+            float: The similarity score.
         """
-        # 确保输入张量至少是一维的
+        # Ensure the input tensors are at least one-dimensional
         if tensor1.dim() == 0:
             tensor1 = tensor1.unsqueeze(0)
         if tensor2.dim() == 0:
             tensor2 = tensor2.unsqueeze(0)
             
         if tensor1.shape != tensor2.shape:
-            # 如果形状不同，将它们展平后再计算相似度
+            # If the shapes are different, flatten them and then compute the similarity
             tensor1 = tensor1.flatten()
             tensor2 = tensor2.flatten()
             
         if method == "cosine":
             return torch.nn.functional.cosine_similarity(tensor1.flatten(), tensor2.flatten(), dim=0).item()
         elif method == "euclidean":
-            return -torch.norm(tensor1 - tensor2).item()  # 负欧几里得距离，值越大表示越相似
+            return -torch.norm(tensor1 - tensor2).item()  # The negative Euclidean distance, the larger the value, the more similar
         elif method == "dot_product":
             return torch.dot(tensor1.flatten(), tensor2.flatten()).item()
         else:
-            raise ValueError(f"不支持的相似度度量方法: {method}")
+            raise ValueError(f"Unsupported similarity metric: {method}")
     
     def _extract_layers(self, verbose:bool=True) -> list:
-        """提取模型中的Transformer层，使用ModelInspector.get_layer方法
+        """Extract the Transformer layers in the model, using the ModelInspector.get_layer method
 
         Args:
-            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+            verbose (bool, optional): Whether to print detailed information. Defaults to True.
 
         Returns:
-            list: Transformer层列表
+            list: The list of Transformer layers
         """
-        # 根据不同的模型架构，找出所有可能的层路径
+        # Find all possible layer paths based on different model architectures
         layer_paths = []
         
-        # 尝试常见的Transformer层路径
+        # Try common Transformer layer paths
         possible_paths = [
-            "layers",             # 直接访问层
-            "model.layers",       # 通过model属性访问层
-            "encoder.layers",     # 通过encoder访问层
-            "transformer.layers"  # 通过transformer访问层
+            "layers",             # Directly access the layers
+            "model.layers",       # Access the layers through the model property
+            "encoder.layers",     # Access the layers through the encoder
+            "transformer.layers"  # Access the layers through the transformer
         ]
         
         for path in possible_paths:
             try:
-                # 尝试获取指定路径下的层
+                # Try to get the layers under the specified path
                 layers_module = self.get_layer(path, verbose=False)
                 
-                # 检查是否是一个包含多个层的模块（ModuleList或类似结构）
+                # Check if it is a module containing multiple layers (ModuleList or similar structure)
                 if hasattr(layers_module, "__len__"):
-                    # 找到有效的层路径
+                    # Find the effective layer path
                     if verbose:
                         log(f"在路径 '{path}' 中找到层集合，包含 {len(layers_module)} 个层")
                     
-                    # 为每个层构建路径并添加到列表中
+                    # Build the path for each layer and add it to the list
                     for i in range(len(layers_module)):
                         layer_path = f"{path}.{i}"
                         layer_paths.append(layer_path)
                     
-                    # 找到有效路径后跳出循环
+                    # After finding the effective path, break the loop
                     break
             except:
-                # 如果路径不存在，继续尝试下一个可能的路径
+                # If the path does not exist, continue to try the next possible path
                 continue
         
-        # 如果没有通过预定义路径找到层，尝试直接搜索
+        # If the layers are not found through the predefined paths, try to search directly for modules containing attention mechanisms
         if not layer_paths:
             if verbose:
                 log("没有在预定义路径中找到层，尝试直接搜索含有注意力机制的模块", level="WARNING")
             
-            # 暂存找到的层路径
+            # Store the found layer paths
             found_paths = []
             
-            # 在模型的所有模块中搜索
+            # Search for modules containing attention mechanisms in all modules of the model
             def search_attention_layers(module, path=""):
-                # 检查当前模块是否包含自注意力和前馈网络（典型的Transformer层特征）
+                # Check if the current module contains self-attention and feed-forward networks (typical Transformer layer characteristics)
                 has_attn = any("attn" in name.lower() for name, _ in module.named_children())
                 has_ff = any(name in ["mlp", "feed_forward"] for name, _ in module.named_children())
                 
                 if has_attn and has_ff:
                     found_paths.append(path)
                 
-                # 递归搜索子模块
+                # Recursively search for submodules
                 for name, child in module.named_children():
                     child_path = f"{path}.{name}" if path else name
                     search_attention_layers(child, child_path)
             
-            # 从根模块开始搜索
+            # Start searching from the root module
             search_attention_layers(self.model)
             
-            # 使用找到的层路径
+            # Use the found layer paths
             layer_paths = found_paths
             
             if verbose and layer_paths:
-                log(f"通过搜索找到 {len(layer_paths)} 个可能的Transformer层")
+                log(f"Through searching, found {len(layer_paths)} possible Transformer layers")
         
-        # 存储层路径和层实例
+        # Store the layer paths and layer instances
         self.layer_paths = layer_paths
         self.layers = [self.get_layer(path, verbose=False) for path in layer_paths]
         
         if verbose:
-            log(f"最终提取到 {len(self.layers)} 个Transformer层")
+            log(f"Finally extracted {len(self.layers)} Transformer layers")
         
         return self.layers
     
     def _extract_attention_heads(self, layer_path:str, layer_idx:int, verbose:bool=True) -> list:
-        """从Transformer层中提取注意力头，使用ModelInspector的方法
+        """Extract the attention heads from the Transformer layer, using the ModelInspector method
 
         Args:
-            layer_path (str): 层的路径
-            layer_idx (int): 层索引
-            verbose (bool, optional): 是否打印详细信息. Defaults to True.
+            layer_path (str): The path of the layer
+            layer_idx (int): The index of the layer
+            verbose (bool, optional): Whether to print detailed information. Defaults to True.
 
         Returns:
-            list: 注意力头列表或参数
+            list: The list of attention heads or parameters
         """
-        # 对于不同的模型架构，注意力头的提取方式可能不同
+        # For different model architectures, the way to extract attention heads may be different
         try:
-            # 获取层实例
+            # Get the layer instance
             layer = self.get_layer(layer_path, verbose=False)
             
-            # 获取自注意力模块
+            # Get the self-attention module
             attn_path = None
             if hasattr(layer, 'self_attn'):
                 attn_path = f"{layer_path}.self_attn"
             else:
-                # 尝试找到注意力模块
+                # Try to find the attention module
                 for name, _ in layer.named_children():
                     if 'attn' in name.lower() or 'attention' in name.lower():
                         attn_path = f"{layer_path}.{name}"
@@ -610,13 +610,13 @@ class TransformerGraphicalor(ModelInspector):
             
             if attn_path is None:
                 if verbose:
-                    log(f"在层 {layer_path} 中找不到注意力模块", level="WARNING")
+                    log(f"No attention module found in layer {layer_path}", level="WARNING")
                 return []
             
-            # 获取注意力模块实例
+            # Get the attention module instance
             attn = self.get_layer(attn_path, verbose=False)
             
-            # 获取注意力头数量
+            # Get the number of attention heads
             if isinstance(attn, transformers.models.llama.modeling_llama.LlamaAttention) or isinstance(attn, transformers.models.qwen2.modeling_qwen2.Qwen2Attention):
                 config = getattr(attn, 'config')
                 n_heads = config.num_attention_heads
@@ -629,28 +629,28 @@ class TransformerGraphicalor(ModelInspector):
             
             if n_heads is None:
                 if verbose:
-                    log(f"无法确定层 {layer_path} 中的注意力头数量", level="WARNING")
+                    log(f"Cannot determine the number of attention heads in layer {layer_path}", level="WARNING")
                 return []
                 
             if verbose:
-                log(f"层 {layer_path} 包含 {n_heads} 个注意力头")
+                log(f"Layer {layer_path} contains {n_heads} attention heads")
             
-            # 提取注意力参数
+            # Extract attention parameters
             heads_data = []
             
-            # 使用ModelInspector的get_para方法获取参数
+            # Use the ModelInspector's get_para method to get parameters
             all_params = {}
             for name, param in attn.named_parameters():
                 if any(x in name for x in ['q_proj', 'k_proj', 'v_proj', 'query', 'key', 'value']):
                     all_params[name] = param
             
-            # 尝试将参数分配到各个头
+            # Try to assign parameters to each head
             for name, param in all_params.items():
                 if 'weight' in name and param.dim() == 2:
                     try:
                         hidden_size = param.shape[0]
                         head_dim = hidden_size // n_heads
-                        # 重塑参数以分配到各个头
+                        # Reshape the parameters to assign to each head
                         param_reshaped = param.view(n_heads, head_dim, -1)
                         
                         for head_idx in range(n_heads):
@@ -659,11 +659,11 @@ class TransformerGraphicalor(ModelInspector):
                             heads_data[head_idx][name] = param_reshaped[head_idx]
                     except Exception as e:
                         if verbose:
-                            log(f"无法将参数 {name} 分配到注意力头: {e}", level="WARNING")
+                            log(f"Cannot assign parameter {name} to attention head: {e}", level="WARNING")
                             
-            # 如果是训练过的模型，尝试获取梯度
+            # If the model is trained, try to get gradients
             if self.status == 'trained':
-                # 使用ModelInspector的get_grad方法获取梯度
+                # Use the ModelInspector's get_grad method to get gradients
                 all_grads = self.get_grad(attn_path, type_='dict', verbose=False)
                 
                 for name, grad in all_grads.items():
@@ -672,7 +672,7 @@ class TransformerGraphicalor(ModelInspector):
                             try:
                                 hidden_size = grad.shape[0]
                                 head_dim = hidden_size // n_heads
-                                # 重塑梯度以分配到各个头
+                                # Reshape the gradients to assign to each head
                                 grad_reshaped = grad.view(n_heads, head_dim, -1)
                                 
                                 for head_idx in range(n_heads):
@@ -681,18 +681,18 @@ class TransformerGraphicalor(ModelInspector):
                                     heads_data[head_idx][f"{name}_grad"] = grad_reshaped[head_idx]
                             except Exception as e:
                                 if verbose:
-                                    log(f"无法将梯度 {name} 分配到注意力头: {e}", level="WARNING")
+                                    log(f"Cannot assign gradient {name} to attention head: {e}", level="WARNING")
             
-            # 如果没有成功提取头信息
+            # If no head information is successfully extracted
             if not heads_data:
                 if verbose:
-                    log(f"无法提取层 {layer_path} 中的注意力头细节，返回完整模块", level="WARNING")
+                    log(f"Cannot extract the attention head details from layer {layer_path}, returning the full module", level="WARNING")
                 
-                # 创建一个简单的头表示，每个头使用相同的参数
+                # Create a simple head representation, each head using the same parameters
                 param_list = self.get_para(attn_path, type_='list', verbose=False)
                 grad_dict = self.get_grad(attn_path, type_='dict', verbose=False) if self.status == 'trained' else {}
                 
-                # 为每个头创建一个包含所有参数的词典
+                # Create a simple head representation, each head using the same parameters
                 for head_idx in range(n_heads):
                     head_data = {}
                     for i, param in enumerate(param_list):
@@ -704,29 +704,29 @@ class TransformerGraphicalor(ModelInspector):
                     heads_data.append(head_data)
                 
                 if verbose:
-                    log(f"为层 {layer_path} 创建了 {n_heads} 个通用注意力头表示")
+                    log(f"Created {n_heads} generic attention head representations for layer {layer_path}")
             
-            # 存储提取的头信息
+            # Store the extracted head information
             self.attention_heads[layer_idx] = heads_data
             return heads_data
             
         except Exception as e:
-            log(f"从层 {layer_path} 提取注意力头时出错: {e}", level="ERROR")
+            log(f"Error extracting attention heads from layer {layer_path}: {e}", level="ERROR")
             return []
     
     def _get_embedding(self, tensor_dict) -> torch.Tensor:
-        """使用嵌入模型获取输入张量的低维表示
+        """Use the embedding model to get the low-dimensional representation of the input tensor
         
         Args:
-            tensor_dict (dict): 包含张量的字典
+            tensor_dict (dict): The dictionary containing the tensors
 
         Returns:
-            torch.Tensor: 嵌入向量，如果没有嵌入模型则返回空张量
+            torch.Tensor: The embedding vector, return an empty tensor if no embedding model
         """
         if self.embedding_model is None:
             return torch.tensor([])
         
-        # 将参数展平并组合为输入
+        # Flatten the parameters and combine them as input
         flattened_tensors = []
         for name, tensor in tensor_dict.items():
             if isinstance(tensor, torch.Tensor) and 'grad' not in name:
@@ -735,53 +735,53 @@ class TransformerGraphicalor(ModelInspector):
         if not flattened_tensors:
             return torch.tensor([])
         
-        # 合并所有张量
+        # Combine all tensors
         combined_tensor = torch.cat(flattened_tensors)
         
-        # 通过嵌入模型获取低维表示
+        # Get the low-dimensional representation through the embedding model
         with torch.no_grad():
             embedding = self.embedding_model(combined_tensor.unsqueeze(0))
-            # 假设嵌入模型是VAE，它可能会返回多个值，我们只使用潜在表示
+            # Assuming the embedding model is a VAE, it may return multiple values, we only use the latent representation
             if isinstance(embedding, tuple):
-                embedding = embedding[0]  # 取VAE的潜在表示
+                embedding = embedding[0]  # Take the latent representation of the VAE
             
-            # 确保返回一维张量
+            # Ensure the returned tensor is one-dimensional
             if embedding.dim() > 1:
                 embedding = embedding.squeeze(0)
             
         return embedding
     
     def _get_layer_representation(self, layer_path:str, layer_idx:int) -> dict:
-        """获取层的表示，使用ModelInspector的方法
+        """Get the representation of the layer, using the ModelInspector method
 
         Args:
-            layer_path (str): 层的路径
-            layer_idx (int): 层索引
+            layer_path (str): The path of the layer
+            layer_idx (int): The index of the layer
 
         Returns:
-            dict: 层的表示
+            dict: The representation of the layer
         """
-        # 获取层参数
+        # Get the layer parameters
         params_list = self.get_para(layer_path, type_='list', verbose=False)
         
-        # 计算参数统计信息
+        # Calculate the parameter statistics
         params_stats = {}
         for i, param in enumerate(params_list):
             param_name = f"param_{i}"
             params_stats[param_name] = self._get_statistics(param)
         
-        # 获取梯度统计信息
+        # Get the gradient statistics
         grads_stats = {}
-        if self.status == 'trained':  # 如果模型已经过校准
+        if self.status == 'trained':  # If the model has been calibrated
             grad_dict = self.get_grad(layer_path, type_='dict', verbose=False)
             for name, grad in grad_dict.items():
                 grads_stats[name] = self._get_statistics(grad)
         
-        # 汇总统计信息
+        # Summarize the statistics
         all_param_stats = torch.cat(list(params_stats.values())) if params_stats else torch.zeros(0)
         all_grad_stats = torch.cat(list(grads_stats.values())) if grads_stats else torch.zeros(0)
         
-        # 获取参数的嵌入表示
+        # Get the embedding representation of the parameters
         param_dict = {f"param_{i}": param for i, param in enumerate(params_list)}
         embedding = self._get_embedding(param_dict)
         

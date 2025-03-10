@@ -4,6 +4,7 @@ import random
 import datetime
 import functools
 import contextlib
+from typing import Union, TextIO
 
 def root():
     for p in sys.path:
@@ -343,12 +344,49 @@ def soft_mkdir(p:str) -> None:
         return True
     return False
 
-def log(msg:str, level:str="INFO") -> None:
+def log(msg:str, level:str="INFO", file=None) -> None:
     """
-    Formatted print.
+    Format and print logs, with optional file output.
+
+    Args:
+        msg (str): log message
+        level (str, optional): log level. Defaults to "INFO".
+        file (Union[str, TextIO, None], optional): 
+            - None: print to console only
+            - str: if it is a path string, write to the log.txt file in the given path
+            - file object: write to the provided file object directly
     """
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{current_time}] [{level}]\t{msg}")
+    log_message = f"[{current_time}] [{level}]\t{msg}"
+    
+    # print to console
+    print(log_message)
+    
+    # handle file writing
+    if file is not None:
+        try:
+            if isinstance(file, str):
+                # If it's a path string, write to log.txt in that path
+                if not os.path.exists(file):
+                    os.makedirs(os.path.dirname(os.path.abspath(file)), exist_ok=True)
+                log_file_path = os.path.join(file, "log.txt") if os.path.isdir(file) else file
+                with open(log_file_path, 'a', encoding='utf-8') as f:
+                    f.write(log_message + "\n")
+            else:
+                # Check if the file object is writable
+                if hasattr(file, 'writable') and not file.writable():
+                    print(f"Warning: The provided file object is not writable. Log message not written to file.")
+                    return
+                
+                # Assume it's a file object, write directly
+                try:
+                    file.write(log_message + "\n")
+                    file.flush()  # Ensure immediate writing
+                except (AttributeError, IOError) as e:
+                    print(f"Warning: Failed to write to the provided file object: {e}")
+        except Exception as e:
+            # Don't let logging errors affect the main program flow
+            print(f"Warning: Error occurred while writing log to file: {e}")
 
 class LogRedirectMixin:
     """Log Redirect Mixin, Redirect stdout to a log file, and save the log file in the given path.

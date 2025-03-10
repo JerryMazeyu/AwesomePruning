@@ -1,7 +1,7 @@
 import os
 import torch
 from torch import nn
-from typing import Union, Generator, Optional
+from typing import Union, Generator, Optional, Any
 import numpy as np
 import matplotlib.pyplot as plt
 from math import ceil, sqrt
@@ -11,6 +11,7 @@ from config import CONF
 from collections import OrderedDict
 
 import torch
+import transformers
 import torch.nn as nn
 import numpy as np
 from collections import OrderedDict
@@ -179,17 +180,17 @@ class ModelInspector(LogRedirectMixin):
         """
         try:
             if self.model._model_type == 'CNN':
-                # 尝试将整个模型移动到CPU以避免设备不一致问题
+                # Try to move the whole model to CPU to avoid device inconsistency problem
                 try:
-                    # 保存原始设备以便之后恢复
+                    # Save the original device for later restoration
                     original_device = next(self.model.parameters()).device
                     self.model = self.model.cpu()
                     summary(self.model, mock_inp, device='cpu')
-                    # 操作完成后将模型移回原设备
+                    # Restore the model to the original device after operation
                     self.model = self.model.to(original_device)
                 except Exception as e:
                     print(f"Error during model summary on CPU: {e}")
-                    # 如果CPU摘要失败，则打印基本信息
+                    # If the CPU summary fails, print basic information
                     self._print_model_info()
             elif self.model._model_type == 'LM':
                 llm_summary(self.model, seq_len=128, batch_size=2, device=CONF.device)
@@ -266,7 +267,7 @@ class ModelInspector(LogRedirectMixin):
             # loss = nn.CrossEntropyLoss()(last_logits, labels)
         
         elif task_type == 'language_modeling':
-            # 语言建模任务评估
+            # Language modeling task evaluation
             total_loss = 0.0
             total_tokens = 0
             
@@ -275,109 +276,109 @@ class ModelInspector(LogRedirectMixin):
                     break
                     
                 try:
-                    # 处理不同格式的输入
+                    # Process different input formats
                     if isinstance(batch, dict):
-                        # 检查input_ids是否为字符串列表
+                        # Check if input_ids is a list of strings
                         if 'input_ids' in batch and isinstance(batch['input_ids'], list) and isinstance(batch['input_ids'][0], str):
-                            # 需要先使用tokenizer处理文本
+                            # Need to preprocess text first
                             if self.tokenizer is None:
                                 log(f"输入是文本但未提供tokenizer")
                                 continue
                                 
-                            # 将文本转换为token ids
+                            # Convert text to token ids
                             encoded = self.tokenizer(
-                                batch['input_ids'],  # 这里是文本列表
+                                batch['input_ids'],  # Here is a list of texts
                                 return_tensors='pt',
                                 padding=True,
                                 truncation=True,
-                                max_length=512  # 可根据需要调整
+                                max_length=512  # Can be adjusted as needed
                             )
                             batch_on_device = {k: v.to(CONF.device) for k, v in encoded.items()}
                         else:
-                            # 已经是tokenized的张量数据，只需移至正确设备
+                            # The data is already tokenized, just move it to the correct device
                             batch_on_device = {k: v.to(CONF.device) if isinstance(v, torch.Tensor) else v 
                                               for k, v in batch.items()}
                         
-                        # 对于没有labels的数据集（常见情况），创建移位labels用于计算下一个token的预测
+                        # For datasets without labels (common case), create shifted labels for calculating next token predictions
                         if 'input_ids' in batch_on_device:
-                            # 将input_ids右移一位作为标签
+                            # Shift input_ids by one to create labels
                             input_ids = batch_on_device['input_ids']
                             
-                            # 如果有attention_mask，使用它来计算有效token数
+                            # If there is an attention_mask, use it to calculate the number of valid tokens
                             if 'attention_mask' in batch_on_device:
                                 attention_mask = batch_on_device['attention_mask']
-                                # 有效token计数（忽略padding）
+                                # Count valid tokens (ignoring padding)
                                 batch_tokens = attention_mask.sum().item()
                             else:
-                                # 如果没有mask，假设所有token都有效
+                                # If there is no mask, assume all tokens are valid
                                 batch_tokens = input_ids.numel()
                                 
-                            # 前向传播
+                            # Forward pass
                             outputs = self.model(**batch_on_device)
                             
-                            # 如果模型已经计算了loss
+                            # If the model has calculated the loss
                             if hasattr(outputs, 'loss') and outputs.loss is not None:
-                                batch_loss = outputs.loss * batch_tokens  # 转换为总损失
+                                batch_loss = outputs.loss * batch_tokens  # Convert to total loss
                             else:
-                                # 否则手动计算loss
-                                # 输入序列移位：预测目标是下一个token
+                                # Otherwise, manually calculate the loss
+                                # Shift the input sequence: the prediction target is the next token
                                 shift_logits = outputs.logits[..., :-1, :].contiguous()
                                 shift_labels = input_ids[..., 1:].contiguous()
                                 
-                                # 使用交叉熵损失
-                                loss_fct = nn.CrossEntropyLoss(reduction='sum')  # 使用sum便于计算总token的损失
+                                # Use cross-entropy loss
+                                loss_fct = nn.CrossEntropyLoss(reduction='sum')  # Use sum for easier calculation of total token loss
                                 batch_loss = loss_fct(
                                     shift_logits.view(-1, shift_logits.size(-1)),
                                     shift_labels.view(-1)
                                 )
                                 
-                                # 计算有效token数量（排除padding）
+                                # Calculate the number of valid tokens (excluding padding)
                                 if 'attention_mask' in batch_on_device:
-                                    # 右移attention_mask来匹配shift_labels
+                                    # Shift the attention_mask to match shift_labels
                                     shift_mask = attention_mask[..., 1:].contiguous()
                                     batch_tokens = shift_mask.sum().item()
                                 else:
                                     batch_tokens = shift_labels.numel()
 
-                            # 反向传播
+                            # Backward pass
                             batch_loss.backward()
 
-                            # 累加总损失和token数
+                            # Accumulate total loss and token count
                             total_loss += batch_loss.item()
                             total_tokens += batch_tokens
                             
                     elif isinstance(batch, list) and all(isinstance(item, str) for item in batch):
-                        # 直接是字符串列表的情况
+                        # The case where the input is a list of strings
                         if self.tokenizer is None:
-                            log(f"输入是文本但未提供tokenizer")
+                            log(f"Input is text but no tokenizer is provided")
                             continue
                             
-                        # 使用tokenizer处理文本
+                        # Use tokenizer to process text
                         encoded = self.tokenizer(
-                            batch,  # 文本列表
+                            batch,  # Text list
                             return_tensors='pt',
                             padding=True,
                             truncation=True,
-                            max_length=512  # 可根据需要调整
+                            max_length=512  # Can be adjusted as needed
                         )
                         batch_on_device = {k: v.to(CONF.device) for k, v in encoded.items()}
                         
-                        # 获取input_ids用于后续处理
+                        # Get input_ids for subsequent processing
                         input_ids = batch_on_device['input_ids']
                         
-                        # 如果有attention_mask，使用它来计算有效token数
+                        # If there is an attention_mask, use it to calculate the number of valid tokens
                         if 'attention_mask' in batch_on_device:
                             attention_mask = batch_on_device['attention_mask']
                             batch_tokens = attention_mask.sum().item()
                         else:
                             batch_tokens = input_ids.numel()
                         
-                        # 前向传播
+                        # Forward pass
                         outputs = self.model(**batch_on_device)
                         
-                        # 处理损失计算与之前相同
+                        # Process loss calculation as before
                         if hasattr(outputs, 'loss') and outputs.loss is not None:
-                            batch_loss = outputs.loss * batch_tokens  # 转换为总损失
+                            batch_loss = outputs.loss * batch_tokens  # Convert to total loss
                         else:
                             shift_logits = outputs.logits[..., :-1, :].contiguous()
                             shift_labels = input_ids[..., 1:].contiguous()
@@ -394,36 +395,36 @@ class ModelInspector(LogRedirectMixin):
                             else:
                                 batch_tokens = shift_labels.numel()
 
-                        # 反向传播
+                        # Backward pass
                         batch_loss.backward()
 
-                        # 累加总损失和token数
+                        # Accumulate total loss and token count
                         total_loss += batch_loss.item()
                         total_tokens += batch_tokens
 
                     else:
-                        log(f"不支持的输入格式: {type(batch)}")
+                        log(f"Unsupported input format: {type(batch)}")
                         continue
                         
                 except Exception as e:
-                    log(f"批次处理错误: {str(e)}")
+                    log(f"Batch processing error: {str(e)}")
                     import traceback
                     log(traceback.format_exc())
                 
-            # 计算平均损失和困惑度
+            # Calculate average loss and perplexity
             if total_tokens > 0:
                 avg_loss = total_loss / total_tokens
                 perplexity = math.exp(avg_loss)
                 
-                # 将困惑度归一化到0-1之间作为分数
-                # 使用一个合理的阈值(比如20)作为高困惑度
+                # Normalize perplexity to 0-1 as score
+                # Use a reasonable threshold (e.g., 20) as high perplexity
                 max_reasonable_ppl = 20.0
                 score = max(0.0, 1.0 - min(perplexity / max_reasonable_ppl, 1.0))
                 
-                log(f"语言建模评估 - 总tokens: {total_tokens}")
-                log(f"语言建模评估 - 平均损失: {avg_loss:.4f}")
-                log(f"语言建模评估 - 困惑度(PPL): {perplexity:.4f}")
-                log(f"语言建模评估 - 归一化分数: {score:.4f}")
+                log(f"Language modeling evaluation - Total tokens: {total_tokens}")
+                log(f"Language modeling evaluation - Average loss: {avg_loss:.4f}")
+                log(f"Language modeling evaluation - Perplexity (PPL): {perplexity:.4f}")
+                log(f"Language modeling evaluation - Normalized score: {score:.4f}")
                 
                 results = {
                     'loss': avg_loss,
@@ -435,10 +436,10 @@ class ModelInspector(LogRedirectMixin):
                 self.status = 'trained'
                 
             else:
-                log(f"没有处理任何有效tokens")
+                log(f"No valid tokens were processed")
                 results = {'loss': float('inf'), 'perplexity': float('inf'), 'score': 0.0, 'total_tokens': 0}
         
-        # 返回score作为主要结果，同时提供完整结果字典供详细分析
+        # Return score as the main result, while providing the complete result dictionary for detailed analysis
         return results
 
     def _infer_task_type(self, dataset:torch.utils.data.Dataset=None):
@@ -523,32 +524,231 @@ class ModelInspector(LogRedirectMixin):
             raise ValueError(f"Make sure that type_ is in 'list' or 'generator'.")
     
     def get_grad(self, layer:Union[str, nn.Module], type_:str='dict', verbose=True) -> Union[list, dict]:
-        """Get target layer's gradients.
-           Make sure that model has been trained.
+        """Get gradients of layer parameters.
 
         Args:
-            layer (Union[str, nn.Module]): Layer name split by dot.
-            verbose (bool, optional): If show verbose infomation. Defaults to True.
+            layer (Union[str, nn.Module]): Layer name or module.
+            type_ (str, optional): Return type, 'list' or 'dict'. Defaults to 'dict'.
+            verbose (bool, optional): Whether to print information. Defaults to True.
 
         Returns:
-            Union[list, dict: Gradient list / dict.
+            Union[list, dict]: Gradients of layer parameters.
         """
-        gradients = {}
         if isinstance(layer, str):
-            layer = self.get_layer(layer, verbose=False)
-        for name, para in layer.named_parameters():
-            if para.grad is not None:
-                gradients[name] = para.grad
-                if verbose:
-                    log(f"Name {name}: shape {list(para.shape)}, min value {torch.min(para.grad).item()}, max value {torch.max(para.grad).item()}.")
-            else:
-                if verbose:
-                    log(f"Name {name}: no gradients.")
-        if type_ == 'dict':
-            return gradients
+            layer = self.get_layer(layer, verbose)
+        
+        if not layer.parameters():
+            if verbose:
+                print("Layer has no parameters.")
+            return [] if type_ == 'list' else {}
+        
+        if type_ == 'list':
+            return [p.grad for p in layer.parameters() if p.grad is not None]
         else:
-            return [x[1] for x in gradients.items()]
+            return {name: p.grad for name, p in layer.named_parameters() if p.grad is not None}
     
+    def get_representation(self, layers:list[str], inputs:Any, forward_type:Optional[str]=None, detach:bool=True, split_attention_heads:bool=False, num_heads:Optional[int]=None, head_dim:Optional[int]=None, verbose:bool=True) -> dict:
+        """Get the representation of specified layers (the output of forward propagation).
+
+        Args:
+            layers (list[str]): The name list of layers to get the representation.
+            inputs (Any): The input data.
+            forward_type (Optional[str], optional): The type of forward propagation. If None, call the model directly;
+                                                     if the input is a dictionary, unpack it and pass it in;
+                                                     if it is a custom method name, call the corresponding method. Defaults to None.
+            detach (bool, optional): Whether to detach the representation, avoid gradient calculation. Defaults to True.
+            split_attention_heads (bool, optional): Whether to split the attention heads. Defaults to False.
+            num_heads (Optional[int], optional): The number of attention heads. If None, try to infer from model configuration. Defaults to None.
+            head_dim (Optional[int], optional): The dimension of each attention head. If None, try to calculate automatically. Defaults to None.
+            verbose (bool, optional): Whether to print information. Defaults to True.
+        Returns:
+            dict: A dictionary mapping layer names to representations.
+        """
+        representations = {}
+        handles = []
+        representations['meta'] = {}
+        representations['meta']['inputs'] = inputs
+        
+        # Register hooks for each layer
+        for layer_name in layers:
+            layer = self.get_layer(layer_name, verbose=verbose)
+            
+            def hook_fn(name):
+                def hook(module, input, output):
+                    if detach:
+                        if isinstance(output, torch.Tensor):
+                            representations[name] = output.detach()
+                        else:
+                            # Handle the case where the output is a tuple or list
+                            representations[name] = output[0].detach() if isinstance(output, (tuple, list)) else output
+                    else:
+                        if isinstance(output, torch.Tensor):
+                            representations[name] = output
+                        else:
+                            representations[name] = output[0] if isinstance(output, (tuple, list)) else output
+                return hook
+            
+            handle = layer.register_forward_hook(hook_fn(layer_name))
+            handles.append(handle)
+        
+        # Move inputs to device
+        if isinstance(inputs, dict):
+            for k, v in inputs.items():
+                if verbose:
+                    if isinstance(v, torch.Tensor):
+                        log(f"Input {k}: shape {v.shape}")
+                    elif isinstance(v, str):
+                        log(f"Input {k}: {v}")
+                    else:
+                        log(f"Input {k}: {v}")
+                if isinstance(v, torch.Tensor):
+                    inputs[k] = v.to(CONF.device)
+                if 'max_new_tokens' in inputs:  # If the input is a dict, and contains 'max_new_tokens', then convert it to int
+                    inputs['max_new_tokens'] = int(inputs['max_new_tokens'])
+        else:
+            inputs = inputs.to(CONF.device)
+        
+        # Execute forward propagation
+        try:
+            if forward_type is None:
+                if isinstance(inputs, dict) or isinstance(inputs, transformers.BatchEncoding):
+                    self.model(**inputs)
+                else:
+                    self.model(inputs)
+            else:
+                forward_method = getattr(self.model, forward_type)
+                if isinstance(inputs, dict) or isinstance(inputs, transformers.BatchEncoding):
+                    outputs = forward_method(**inputs)
+                else:
+                    outputs = forward_method(inputs)
+                representations['meta']['outputs'] = outputs
+                if verbose:
+                    log(f"Outputs: {outputs}")
+        finally:
+            # Remove hooks
+            for handle in handles:
+                handle.remove()
+        
+        # If split_attention_heads is True, split the attention heads
+        if split_attention_heads:
+            for layer_name in layers:
+                if layer_name in representations:
+                    representations[layer_name] = self.split_heads(
+                        representations[layer_name], 
+                        num_heads=num_heads, 
+                        head_dim=head_dim
+                    )
+        
+        return representations
+    
+    def split_heads(self, tensor: torch.Tensor, num_heads: Optional[int] = None, head_dim: Optional[int] = None) -> torch.Tensor:
+        """Split the attention heads in the representation.
+
+        Args:
+            tensor (torch.Tensor): The tensor to split the attention heads.
+            num_heads (Optional[int], optional): The number of attention heads. If None, try to infer from model configuration. Defaults to None.
+            head_dim (Optional[int], optional): The dimension of each attention head. If None, try to calculate automatically. Defaults to None.
+
+        Returns:
+            torch.Tensor: The separated attention head representation, shape is [batch_size, seq_len, num_heads, head_dim].
+        """
+        # Check if the input is a tensor
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("The input must be a torch.Tensor.")
+            
+        # Get the shape of the tensor
+        shape = tensor.shape
+        
+        # If num_heads is None, try to infer from model configuration
+        if num_heads is None:
+            if hasattr(self.model, "config") and hasattr(self.model.config, "num_attention_heads"):
+                num_heads = self.model.config.num_attention_heads
+            else:
+                raise ValueError("num_heads is not specified and cannot be inferred from model configuration, please specify it manually.")
+        
+        # Handle different shapes of tensors
+        if len(shape) == 3:  # [batch_size, seq_len, hidden_dim]
+            batch_size, seq_len, hidden_dim = shape
+            
+            # If head_dim is None, calculate the dimension of each head
+            if head_dim is None:
+                if hidden_dim % num_heads != 0:
+                    raise ValueError(f"The hidden dimension {hidden_dim} cannot be divided by the number of attention heads {num_heads}.")
+                head_dim = hidden_dim // num_heads
+            
+            # Reshape the tensor, split the attention heads
+            # [batch_size, seq_len, hidden_dim] -> [batch_size, seq_len, num_heads, head_dim]
+            return tensor.view(batch_size, seq_len, num_heads, head_dim)
+            
+        elif len(shape) == 4 and shape[2] == shape[3]:  # It may be an attention matrix [batch_size, num_heads, seq_len, seq_len]
+            # In this case, the tensor may already contain separated attention heads
+            return tensor
+            
+        else:
+            # If it is other shapes, try to split the tensor according to num_heads
+            if len(shape) >= 2:
+                # Assume the last dimension is hidden_dim
+                hidden_dim = shape[-1]
+                
+                if head_dim is None:
+                    if hidden_dim % num_heads != 0:
+                        raise ValueError(f"The dimension {hidden_dim} cannot be divided by the number of attention heads {num_heads}.")
+                    head_dim = hidden_dim // num_heads
+                
+                # Build a new shape, keep the previous dimensions unchanged, and split the last dimension
+                new_shape = list(shape[:-1]) + [num_heads, head_dim]
+                return tensor.view(*new_shape)
+            else:
+                raise ValueError(f"Cannot handle the tensor with shape {shape}, at least 2 dimensions are required.")
+    
+    def get_attention_scores(self, layers: list[str], inputs: Any, forward_type: Optional[str] = None) -> dict:
+        """Get the attention matrix (attention scores).
+
+        Args:
+            layers (list[str]): The name list of layers to get the attention scores (usually self-attention layers).
+            inputs (Any): The input data.
+            forward_type (Optional[str], optional): The type of forward propagation, same as get_representation. Defaults to None.
+
+        Returns:
+            dict: A dictionary mapping layer names to attention scores.
+        """
+        attention_scores = {}
+        handles = []
+        
+        # Register hooks for each layer
+        for layer_name in layers:
+            layer = self.get_layer(layer_name, verbose=False)
+            
+            # Set different hooks for different types of attention layers
+            def hook_fn(name):
+                def hook(module, input, output):
+                    # The output format of different attention layers may be different
+                    # Usually, the attention scores are in the first element of the output tuple
+                    # Here, we assume that the attention scores are in the first element of the output tuple, and you may need to adjust it in actual cases
+                    if isinstance(output, tuple) and len(output) > 1:
+                        # For some models (e.g., BERT), the attention scores are in the second position
+                        scores = output[1] if len(output) > 1 else output[0]
+                        attention_scores[name] = scores.detach()
+                    else:
+                        # If the output is not a tuple, you may need additional logic to extract the attention scores
+                        attention_scores[name] = output.detach() if isinstance(output, torch.Tensor) else None
+                return hook
+            
+            # Register hooks
+            handle = layer.register_forward_hook(hook_fn(layer_name))
+            handles.append(handle)
+        
+        # Execute forward propagation
+        try:
+            # Reuse the logic in get_representation for forward propagation
+            self.get_representation(layers=[], inputs=inputs, forward_type=forward_type)
+        finally:
+            # Remove hooks
+            for handle in handles:
+                handle.remove()
+        
+        return attention_scores
+
     def plot_histogram(self, tensors:list[torch.Tensor], bin:int=30, save_path='tensor_hist.png'):
         """
         Plot a histogram of the values of a flattened tensor.
@@ -564,11 +764,11 @@ class ModelInspector(LogRedirectMixin):
         
         fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 15))
         
-        # 处理单个子图的情况
+        # Handle the case where there is only one subplot
         if num_rows == 1 and num_cols == 1:
-            axes = [axes]  # 将单个Axes对象包装成列表
+            axes = [axes]  # Wrap the single Axes object in a list
         else:
-            # 将多维数组展平为一维
+            # Flatten the multi-dimensional array into a one-dimensional array
             axes = axes.flatten() if hasattr(axes, 'flatten') else axes.reshape(-1)
         
         for i, tensor in enumerate(tensors):
@@ -579,7 +779,7 @@ class ModelInspector(LogRedirectMixin):
             axes[i].set_ylabel('Frequency')
             axes[i].grid(True)
         
-        # 只有在有多个子图的情况下才需要删除多余的子图
+        # Only delete extra subplots if there are multiple subplots
         if len(axes) > i + 1:
             for j in range(i + 1, len(axes)):
                 fig.delaxes(axes[j])
@@ -629,20 +829,19 @@ if __name__ == "__main__":
     print(f"Wikitext2 dataset loaded, size: {len(wikitext2)}")
     
     # Get Llama model (or use a smaller model like GPT-2)
-    llama2, tokenizer = get_model('Qwen2.5-3B', cache_dir=CONF.cache_dir)
-    
-    # # Try to move model to GPU
-    # try:
-    #     llama2.to(CONF.device)
-    #     print(f"LLM model loaded on {CONF.device}")
-    # except RuntimeError as e:
-    #     print(f"Model too large for {CONF.device}, keeping on CPU: {e}")
-    
-    # Use ModelInspector to check model
-    nlp_inspector = ModelInspector(llama2, tokenizer)
-    nlp_inspector.summary()
+    qwen25, tokenizer = get_model('Qwen2.5-3B', cache_dir=CONF.cache_dir)
 
-    nlp_inspector.calibrate(wikitext2)
+    case0 = "Hello, how are you?"
+    encoded = tokenizer(case0,  # Here is a list of texts
+                        return_tensors='pt')
+
+    # Use ModelInspector to check model
+    nlp_inspector = ModelInspector(qwen25, tokenizer)
+    # nlp_inspector.summary()
+    # nlp_inspector.calibrate(wikitext2)
+    nlp_layers = ['model.layers.0.self_attn', 'model.layers.0.mlp']
+    reps = nlp_inspector.get_representation(nlp_layers, encoded)
+    print(reps)
     
     # # Check specific layer
     # nlp_layer = 'model.layers.0.self_attn'

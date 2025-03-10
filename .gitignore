@@ -7,3 +7,6 @@ raw_data/
 debug.py
 experiments/
 .cursor/
+data/my_data.py
+models/my_models.py
+models/MiniGPT-4

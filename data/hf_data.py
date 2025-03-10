@@ -23,13 +23,13 @@ DATASET_MAP = {
 # Dataset parameter mappings
 ARG_MAP = {
     'imdb': {'split': 'train'},
-    'sst2': {'split': 'train'},
-    'mnli': {'split': 'train'},
+    # 'sst2': {'split': 'train'},
+    # 'mnli': {'split': 'train'},
     'wikitext2': {'name': 'wikitext-2-raw-v1', 'split': 'train'},
-    'wikitext103': {'split': 'train'},
-    'c4': {'split': 'train'},
-    'squad': {'split': 'train'},
-    'squad_v2': {'split': 'train'}
+    # 'wikitext103': {'split': 'train'},
+    # 'c4': {'split': 'train'},
+    # 'squad': {'split': 'train'},
+    # 'squad_v2': {'split': 'train'}
 }
 
 # Dataset metadata

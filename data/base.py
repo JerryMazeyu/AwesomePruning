@@ -14,21 +14,21 @@ class BaseDataSet(Dataset):
 
     def __getitem__(self, idx):
         item = self.dt[idx]
-        # 如果是HuggingFace数据集，返回处理后的数据
+        # If the dataset is a HuggingFace dataset, return the processed data
         if hasattr(self.dt, 'features'):
             if self.meta_.get('task_type') == 'language_modeling':
-                # 对于语言建模任务，确保返回的是字典格式的input_ids
+                # For language modeling tasks, ensure the returned data is in dictionary format
                 if isinstance(item, dict):
-                    # 已经是字典格式，检查是否有'input_ids'键
+                    # The data is already in dictionary format, check if it has the 'input_ids' key
                     if 'input_ids' in item:
                         return {'input_ids': item['input_ids']}
                     elif 'text' in item:
                         return {'input_ids': item['text']}
                     else:
-                        # 如果没有期望的键，返回整个字典
+                        # If the expected key is not found, return the entire dictionary
                         return item
                 else:
-                    # 不是字典格式，尝试包装成字典
+                    # If the data is not in dictionary format, try to wrap it in a dictionary
                     return {'input_ids': item}
             elif self.meta_.get('task_type') == 'sequence_classification':
                 if isinstance(item, dict):
@@ -37,11 +37,11 @@ class BaseDataSet(Dataset):
                     else:
                         return item
                 else:
-                    # 处理非字典格式的分类数据
+                    # Process non-dictionary format classification data
                     return item
             else:
                 return item
-        # 如果是torchvision数据集，直接返回
+        # If the dataset is a torchvision dataset, return the original data
         return item
 
     @property
@@ -50,5 +50,5 @@ class BaseDataSet(Dataset):
 
     @property
     def task_type(self):
-        """获取数据集的任务类型"""
+        """Get the task type of the dataset"""
         return self.meta_.get('task_type', None)

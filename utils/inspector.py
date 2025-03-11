@@ -547,7 +547,9 @@ class ModelInspector(LogRedirectMixin):
         else:
             return {name: p.grad for name, p in layer.named_parameters() if p.grad is not None}
     
-    def get_representation(self, layers:list[str], inputs:Any, forward_type:Optional[str]=None, detach:bool=True, split_attention_heads:bool=False, num_heads:Optional[int]=None, head_dim:Optional[int]=None, verbose:bool=True) -> dict:
+    def get_representation(self, layers:list[str], inputs:Any, forward_type:Optional[str]=None, 
+                           detach:bool=True, split_attention_heads:bool=False, num_heads:Optional[int]=None, 
+                           head_dim:Optional[int]=None, verbose:bool=True, stack_outputs:bool=True) -> dict:
         """Get the representation of specified layers (the output of forward propagation).
 
         Args:
@@ -561,6 +563,7 @@ class ModelInspector(LogRedirectMixin):
             num_heads (Optional[int], optional): The number of attention heads. If None, try to infer from model configuration. Defaults to None.
             head_dim (Optional[int], optional): The dimension of each attention head. If None, try to calculate automatically. Defaults to None.
             verbose (bool, optional): Whether to print information. Defaults to True.
+            stack_outputs (bool, optional): Whether to stack multiple outputs from repeated forward passes (e.g. in generate method). Defaults to True.
         Returns:
             dict: A dictionary mapping layer names to representations.
         """
@@ -569,23 +572,30 @@ class ModelInspector(LogRedirectMixin):
         representations['meta'] = {}
         representations['meta']['inputs'] = inputs
         
+        # Initialize containers for layer representations
+        for layer_name in layers:
+            representations[layer_name] = [] if stack_outputs else None
+        
         # Register hooks for each layer
         for layer_name in layers:
             layer = self.get_layer(layer_name, verbose=verbose)
             
             def hook_fn(name):
                 def hook(module, input, output):
-                    if detach:
-                        if isinstance(output, torch.Tensor):
-                            representations[name] = output.detach()
-                        else:
-                            # Handle the case where the output is a tuple or list
-                            representations[name] = output[0].detach() if isinstance(output, (tuple, list)) else output
+                    # Process the output
+                    if isinstance(output, torch.Tensor):
+                        processed_output = output.detach() if detach else output
                     else:
-                        if isinstance(output, torch.Tensor):
-                            representations[name] = output
-                        else:
-                            representations[name] = output[0] if isinstance(output, (tuple, list)) else output
+                        # Handle the case where the output is a tuple or list
+                        processed_output = output[0].detach() if isinstance(output, (tuple, list)) and detach else output[0] if isinstance(output, (tuple, list)) else output
+                        if detach and isinstance(processed_output, torch.Tensor):
+                            processed_output = processed_output.detach()
+                    
+                    # Store the output
+                    if stack_outputs:
+                        representations[name].append(processed_output)
+                    else:
+                        representations[name] = processed_output
                 return hook
             
             handle = layer.register_forward_hook(hook_fn(layer_name))
@@ -629,15 +639,81 @@ class ModelInspector(LogRedirectMixin):
             for handle in handles:
                 handle.remove()
         
+        # If stacking is enabled, process the collected outputs
+        if stack_outputs:
+            for layer_name in layers:
+                if layer_name in representations and representations[layer_name]:
+                    # Check if tensors can be stacked (have same shape)
+                    tensors = representations[layer_name]
+                    if all(isinstance(t, torch.Tensor) for t in tensors) and all(t.shape == tensors[0].shape for t in tensors):
+                        # Stack tensors if they have the same shape
+                        representations[layer_name] = torch.stack(tensors, dim=0)
+                    else:
+                        # If shapes differ or not all are tensors, keep as list
+                        if verbose:
+                            log(f"Warning: Could not stack tensors for layer {layer_name} due to different shapes or types")
+        
         # If split_attention_heads is True, split the attention heads
         if split_attention_heads:
             for layer_name in layers:
                 if layer_name in representations:
-                    representations[layer_name] = self.split_heads(
-                        representations[layer_name], 
-                        num_heads=num_heads, 
-                        head_dim=head_dim
-                    )
+                    representation = representations[layer_name]
+                    
+                    if stack_outputs:
+                        # Case 1: If stacking succeeded and we have a stacked tensor
+                        if isinstance(representation, torch.Tensor) and len(representation.shape) >= 3:
+                            # For tensors with shape [num_steps, batch, seq_len, hidden_dim]
+                            if len(representation.shape) == 4:
+                                num_steps = representation.shape[0]
+                                split_heads_results = []
+                                
+                                for i in range(num_steps):
+                                    split_heads_results.append(self.split_heads(
+                                        representation[i],
+                                        num_heads=num_heads,
+                                        head_dim=head_dim
+                                    ))
+                                
+                                # Try to stack the results if shapes are consistent
+                                if all(isinstance(t, torch.Tensor) for t in split_heads_results) and all(t.shape == split_heads_results[0].shape for t in split_heads_results):
+                                    representations[layer_name] = torch.stack(split_heads_results, dim=0)
+                                else:
+                                    representations[layer_name] = split_heads_results
+                            else:
+                                # For a single tensor with appropriate dimensions
+                                representations[layer_name] = self.split_heads(
+                                    representation,
+                                    num_heads=num_heads,
+                                    head_dim=head_dim
+                                )
+                        
+                        # Case 2: If stacking failed and we have a list of tensors
+                        elif isinstance(representation, list):
+                            split_heads_results = []
+                            
+                            for tensor in representation:
+                                if isinstance(tensor, torch.Tensor) and len(tensor.shape) >= 2:
+                                    split_heads_results.append(self.split_heads(
+                                        tensor,
+                                        num_heads=num_heads,
+                                        head_dim=head_dim
+                                    ))
+                                else:
+                                    # Skip non-tensor or inappropriate dimension tensors
+                                    split_heads_results.append(tensor)
+                                    if verbose:
+                                        log(f"Warning: Could not split heads for a tensor in layer {layer_name}")
+                            
+                            representations[layer_name] = split_heads_results
+                    
+                    # Case 3: If stack_outputs is False, we just have a single tensor
+                    else:
+                        if isinstance(representation, torch.Tensor) and len(representation.shape) >= 2:
+                            representations[layer_name] = self.split_heads(
+                                representation,
+                                num_heads=num_heads,
+                                head_dim=head_dim
+                            )
         
         return representations
     

@@ -5,13 +5,10 @@ import datetime
 import functools
 import contextlib
 from typing import Union, TextIO
+from config.config import CONF
 
 def root():
-    for p in sys.path:
-        if p.endswith('AwesomePruning'):
-            return p
-    else:
-        raise ValueError('Cannot find root path of the project')
+    return CONF.root_path
     
 def generate_name() -> str:
     """Random generate a name.

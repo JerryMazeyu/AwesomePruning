@@ -48,14 +48,12 @@ def get_dataset(name, **kwargs):
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
-# 修改导入方式，使用惰性导入以避免立即执行导致错误的代码
+
 def get_mm_datasets(name):
-    # 仅在需要时才导入相关函数
     from .my_data import get_mm_datasets as _get_mm_datasets
     return _get_mm_datasets(name)
 
-# 定义一个获取 MultimodalDataSet 类的函数
-def get_multimodal_dataset_class():
+def get_multimodal_dataset_class():  # Only used in local environment
     from .my_data import MultimodalDataSet
     return MultimodalDataSet
 
